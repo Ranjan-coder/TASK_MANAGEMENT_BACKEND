@@ -225,15 +225,24 @@ const updateGroupKeys = asyncHandler(async (req, res) => {
 /**
  * GET /api/v1/chat/conversations/:id/messages?cursor=<msgId>&limit=30
  * Fetch paginated messages (cursor-based, oldest-first display order).
+ *
+ * Without a cursor (initial open), returns this member's unread messages +
+ * some read context above them instead of just "the last N messages" — see
+ * chatService.getMessages for the full behavior.
  */
 const getMessages = asyncHandler(async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 30, 50);
   const { cursor } = req.query;
 
+  // req.conversation is set by the requireMembership middleware on this route.
+  const member = req.conversation.members.find((m) => m.user.toString() === req.user._id.toString());
+
   const result = await chatService.getMessages({
     conversationId: req.params.id,
     cursor,
-    limit
+    limit,
+    userId: req.user._id,
+    lastRead: member?.lastRead || null
   });
 
   res.status(200).json(new ApiResponse(200, result, "Messages fetched"));
@@ -323,12 +332,28 @@ const reactToMessage = asyncHandler(async (req, res) => {
 
 /**
  * DELETE /api/v1/chat/messages/:id
- * Soft-delete a message (sender only).
+ * Body: { scope: "everyone" | "me" }
+ *  - "everyone" (sender only): soft-deletes for all participants.
+ *  - "me" (any member): hides the message from just this user's view —
+ *    everyone else still sees it normally.
  */
 const deleteMessage = asyncHandler(async (req, res) => {
-  const message = await chatService.deleteMessage(req.params.id, req.user._id);
-
+  const scope = req.body?.scope === "me" ? "me" : "everyone";
   const io = getIO();
+
+  if (scope === "me") {
+    const message = await chatService.deleteMessageForMe(req.params.id, req.user._id);
+    // Sync the hide across this user's other open tabs/devices in real time.
+    if (io) {
+      io.to(`user:${req.user._id}`).emit("chat:message:deletedForMe", {
+        messageId: message._id,
+        conversationId: message.conversation
+      });
+    }
+    return res.status(200).json(new ApiResponse(200, null, "Message deleted for you"));
+  }
+
+  const message = await chatService.deleteMessageForEveryone(req.params.id, req.user._id);
   if (io) {
     io.to(`conv:${message.conversation}`).emit("chat:message:deleted", {
       messageId: message._id,

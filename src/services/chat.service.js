@@ -147,38 +147,93 @@ const saveMessage = async ({ conversationId, senderId, type, ciphertext, iv, con
   return message.populate("sender", "name avatarUrl");
 };
 
+// Initial-load tuning for the unread-first view (see getMessages below).
+const UNREAD_CONTEXT_COUNT = 20; // already-read messages shown for context above the unread ones
+const UNREAD_INITIAL_CAP = 50; // cap so a huge backlog isn't dumped in one response
+
 /**
- * Get paginated messages for a conversation (cursor-based, descending).
+ * Fetch one descending, limit-bounded page and flip it back to chronological
+ * order. Shared by both the cursor-pagination path and the initial-load path
+ * below so neither ever loads more than `limit + 1` documents.
  */
-const getMessages = async ({ conversationId, cursor, limit = 30 }) => {
-  const query = {
-    conversation: conversationId
-  };
-
-  // If cursor is provided, fetch messages older than that message's createdAt
-  if (cursor) {
-    const cursorMessage = await Message.findById(cursor).select("createdAt").lean();
-    if (cursorMessage) {
-      query.createdAt = { $lt: cursorMessage.createdAt };
-    }
-  }
-
-  const messages = await Message.find(query)
+const fetchDescPage = async (query, limit) => {
+  const docs = await Message.find(query)
     .sort({ createdAt: -1 })
     .limit(limit + 1)
     .populate("sender", "name avatarUrl")
     .populate("replyTo", "ciphertext iv type content sender createdAt isDeleted")
     .lean();
 
-  const hasMore = messages.length > limit;
-  if (hasMore) messages.pop();
+  const hasMore = docs.length > limit;
+  if (hasMore) docs.pop();
+  docs.reverse(); // oldest -> newest, the order the client renders in
 
-  // Return in chronological order for the client
-  messages.reverse();
+  return { items: docs, hasMore, nextCursor: hasMore && docs.length > 0 ? docs[0]._id : null };
+};
 
-  const nextCursor = hasMore && messages.length > 0 ? messages[0]._id : null;
+/**
+ * Get messages for a conversation.
+ *
+ * - With a cursor: plain backward pagination (unchanged) — fetches the next
+ *   older page, bounded by `limit`. Used for "load previous messages".
+ * - Without a cursor (initial open): returns this member's unread messages
+ *   (capped at UNREAD_INITIAL_CAP, most recent first if there's a huge
+ *   backlog) plus up to UNREAD_CONTEXT_COUNT already-read messages
+ *   immediately before them for context, so the view isn't just a bare list
+ *   starting mid-conversation. `unreadMarkerId` tells the client which
+ *   message starts the unread section so it can render a divider there and
+ *   scroll straight to it. If nothing is unread, falls back to the plain
+ *   "most recent page" behavior (today's default) with no marker.
+ *
+ * Either way, the response never contains more than a bounded number of
+ * documents, and older history stays reachable exclusively via `nextCursor`
+ * — the server never loads (and the client never receives) a whole
+ * conversation's history at once.
+ */
+const getMessages = async ({ conversationId, cursor, limit = 30, userId, lastRead }) => {
+  const baseQuery = {
+    conversation: conversationId,
+    // Exclude messages this user has "deleted for me" — they should never
+    // see them again, regardless of what other members can still see.
+    deletedFor: { $ne: userId }
+  };
 
-  return { messages, hasMore, nextCursor };
+  // ── Backward pagination ("load previous messages") — unchanged ──────────
+  if (cursor) {
+    const cursorMessage = await Message.findById(cursor).select("createdAt").lean();
+    const query = cursorMessage ? { ...baseQuery, createdAt: { $lt: cursorMessage.createdAt } } : baseQuery;
+    const { items, hasMore, nextCursor } = await fetchDescPage(query, limit);
+    return { messages: items, hasMore, nextCursor, unreadMarkerId: null };
+  }
+
+  // ── Initial load: unread-first ───────────────────────────────────────────
+  const unread = lastRead
+    ? (
+        await fetchDescPage(
+          { ...baseQuery, createdAt: { $gt: lastRead }, sender: { $ne: userId } },
+          UNREAD_INITIAL_CAP
+        )
+      ).items
+    : [];
+
+  if (unread.length === 0) {
+    // Nothing unread — fall back to the plain "most recent page" view.
+    const { items, hasMore, nextCursor } = await fetchDescPage(baseQuery, limit);
+    return { messages: items, hasMore, nextCursor, unreadMarkerId: null };
+  }
+
+  // Context: already-read messages immediately preceding the unread window.
+  const { items: context, hasMore, nextCursor } = await fetchDescPage(
+    { ...baseQuery, createdAt: { $lt: unread[0].createdAt } },
+    UNREAD_CONTEXT_COUNT
+  );
+
+  return {
+    messages: [...context, ...unread],
+    hasMore,
+    nextCursor,
+    unreadMarkerId: unread[0]._id
+  };
 };
 
 /**
@@ -217,17 +272,45 @@ const toggleReaction = async (messageId, userId, emoji) => {
   return message;
 };
 
+// "Delete for everyone" is only allowed within this window of sending — keep
+// in sync with DELETE_FOR_EVERYONE_WINDOW_MS in the frontend's MessageBubble.
+const DELETE_FOR_EVERYONE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
 /**
- * Soft-delete a message. Only sender can delete their own messages.
+ * Soft-delete a message for everyone. Only the sender can do this, and only
+ * within 10 minutes of sending — enforced here as the source of truth
+ * (the frontend also hides the option once expired, but that's UX only).
  */
-const deleteMessage = async (messageId, userId) => {
+const deleteMessageForEveryone = async (messageId, userId) => {
   const message = await Message.findOne({ _id: messageId, sender: userId });
   if (!message) throw new ApiError(403, "Cannot delete this message");
+
+  const ageMs = Date.now() - message.createdAt.getTime();
+  if (ageMs > DELETE_FOR_EVERYONE_WINDOW_MS) {
+    throw new ApiError(403, "Messages can only be deleted for everyone within 10 minutes of sending");
+  }
+
   message.isDeleted = true;
   message.ciphertext = null;
   message.iv = null;
   message.attachments = [];
   await message.save();
+  return message;
+};
+
+/**
+ * Hide a message from just this user's view ("delete for me"). The message
+ * is untouched for every other participant. Any conversation member may do
+ * this to any message, including ones they didn't send.
+ */
+const deleteMessageForMe = async (messageId, userId) => {
+  const message = await Message.findById(messageId);
+  if (!message) throw new ApiError(404, "Message not found");
+
+  const conv = await Conversation.findOne({ _id: message.conversation, "members.user": userId });
+  if (!conv) throw new ApiError(403, "You are not a member of this conversation");
+
+  await Message.updateOne({ _id: messageId }, { $addToSet: { deletedFor: userId } });
   return message;
 };
 
@@ -308,7 +391,8 @@ module.exports = {
   getMessages,
   markAsRead,
   toggleReaction,
-  deleteMessage,
+  deleteMessageForEveryone,
+  deleteMessageForMe,
   addGroupMember,
   removeGroupMember,
   updateGroupKeys

@@ -79,7 +79,12 @@ const messageSchema = new mongoose.Schema(
 
     isEdited: { type: Boolean, default: false },
     editedAt: { type: Date, default: null },
-    isDeleted: { type: Boolean, default: false }   // soft delete — shows "Message deleted"
+    isDeleted: { type: Boolean, default: false },  // soft delete "for everyone" — shows "Message deleted"
+
+    // "Delete for me" — WhatsApp-style per-user hide. Users in this list never
+    // see the message again (it's excluded from their fetches entirely); it
+    // still exists normally for everyone else. Independent of isDeleted.
+    deletedFor: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }]
   },
   { timestamps: true }
 );
