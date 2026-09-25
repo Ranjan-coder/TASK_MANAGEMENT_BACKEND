@@ -39,7 +39,7 @@ const attachmentSchema = new mongoose.Schema(
     relatedTo: {
       entityType: {
         type: String,
-        enum: ["task", "comment"],
+        enum: ["task", "comment", "message"],
         required: true
       },
       entityId: {

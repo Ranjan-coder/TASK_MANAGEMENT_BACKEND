@@ -106,7 +106,22 @@ const userSchema = new mongoose.Schema(
       type: Number,
       default: 0
     },
-    currentSessions: [sessionSchema]
+    currentSessions: [sessionSchema],
+
+    // E2E Chat — ECDH public key (SPKI base64-exported, never the private key)
+    publicKey: {
+      type: String,
+      default: null,
+      select: true
+    },
+    keyVersion: {
+      type: Number,
+      default: 0
+    },
+    keyUpdatedAt: {
+      type: Date,
+      default: null
+    }
   },
   {
     timestamps: true

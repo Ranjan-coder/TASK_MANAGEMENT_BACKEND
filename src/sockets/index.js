@@ -4,6 +4,7 @@ const config = require("../config/env");
 const User = require("../models/User");
 const Task = require("../models/Task");
 const logger = require("../utils/logger");
+const { registerChatEvents, setOnline } = require("./chat.socket");
 
 let io = null;
 
@@ -44,11 +45,14 @@ const initSockets = (httpServer) => {
     }
   });
 
-  io.on("connection", (socket) => {
+  io.on("connection", async (socket) => {
     logger.info(`Socket connected: ${socket.id} (User: ${socket.user.name})`);
 
     // Automatically join user's private notification room
     socket.join(`user:${socket.user._id}`);
+
+    // Set user online in Redis + broadcast presence
+    await setOnline(socket.user._id.toString(), io);
 
     // Join task room with access verification
     socket.on("join:task", async ({ taskId }) => {
@@ -77,10 +81,14 @@ const initSockets = (httpServer) => {
       socket.leave(`task:${taskId}`);
     });
 
+    // Register all chat-related socket events
+    registerChatEvents(socket, io);
+
     socket.on("disconnect", () => {
       logger.info(`Socket disconnected: ${socket.id}`);
     });
   });
+
 
   return io;
 };

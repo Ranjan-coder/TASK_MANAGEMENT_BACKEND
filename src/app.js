@@ -18,6 +18,7 @@ const commentRoutes = require("./routes/comment.routes");
 const uploadRoutes = require("./routes/upload.routes");
 const notificationRoutes = require("./routes/notification.routes");
 const dashboardRoutes = require("./routes/dashboard.routes");
+const chatRoutes = require("./routes/chat.routes");
 
 const app = express();
 
@@ -75,10 +76,11 @@ app.get("/health", (req, res) => {
 app.use("/api/v1/auth", authRoutes);
 app.use("/api/v1/users", userRoutes);
 app.use("/api/v1/tasks", taskRoutes);
-app.use("/api/v1", commentRoutes);         // handles /tasks/:taskId/comments + /comments/:id
+app.use("/api/v1", commentRoutes);
 app.use("/api/v1/uploads", uploadRoutes);
 app.use("/api/v1/notifications", notificationRoutes);
 app.use("/api/v1/dashboard", dashboardRoutes);
+app.use("/api/v1/chat", chatRoutes);
 
 // 404 Handler
 app.use((req, res, next) => {
