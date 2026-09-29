@@ -14,6 +14,14 @@ const { createLimiter } = require("../middlewares/rateLimiter.middleware");
 router.use(authMiddleware);
 
 // ── Rate limiter for message sending: 60 messages/min per user ───────────────
+// Files: 60 per hour per person (each up to the upload size limit)
+const attachmentLimiter = require("../middlewares/rateLimiter.middleware").createLimiter({
+  windowMs: 60 * 60 * 1000,
+  max: 60,
+  message: "You've sent a lot of files. Please wait a little."
+});
+const reactionLimiter = require("../middlewares/rateLimiter.middleware").createLimiter({ windowMs: 60 * 1000, max: 60, message: "Too many reactions." });
+
 const messageLimiter = (() => {
   try {
     const rateLimit = require("express-rate-limit");
@@ -55,6 +63,10 @@ const requireMembership = asyncHandler(async (req, res, next) => {
 
 // ── Public Key Routes ────────────────────────────────────────────────────────
 router.post("/keys/publish", chatController.publishPublicKey);
+// Must come before /keys/:userId
+router.get("/keys/bundle", chatController.getKeyBundle);
+router.put("/keys/bundle", chatController.putKeyBundle);
+router.get("/keys/recovery", chatController.getRecoveryBundle);
 router.get("/keys/:userId", chatController.getPublicKey);
 
 // ── Conversation Routes ──────────────────────────────────────────────────────
@@ -68,6 +80,7 @@ router.patch("/conversations/:id", requireMembership, chatController.updateConve
 router.post("/conversations/:id/members", requireMembership, chatController.addMember);
 router.delete("/conversations/:id/members/:userId", requireMembership, chatController.removeMember);
 router.put("/conversations/:id/group-keys", requireMembership, chatController.updateGroupKeys);
+router.post("/conversations/:id/group-keys/share", requireMembership, chatController.shareGroupKeys);
 
 // ── Message Routes ───────────────────────────────────────────────────────────
 router.get("/conversations/:id/messages", requireMembership, chatController.getMessages);
@@ -77,13 +90,15 @@ router.post("/conversations/:id/messages", requireMembership, messageLimiter, ch
 router.post(
   "/conversations/:id/attachments",
   requireMembership,
+  messageLimiter,
+  attachmentLimiter,
   upload.single("file"),
   uploadChatAttachment
 );
 
 // ── Per-message Routes ───────────────────────────────────────────────────────
 router.patch("/messages/:id/read", chatController.markRead);
-router.patch("/messages/:id/react", chatController.reactToMessage);
+router.patch("/messages/:id/react", reactionLimiter, chatController.reactToMessage);
 router.patch("/messages/:id/edit", chatController.editMessage);
 router.delete("/messages/:id", chatController.deleteMessage);
 

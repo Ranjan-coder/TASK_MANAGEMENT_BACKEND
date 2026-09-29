@@ -32,8 +32,24 @@ const uploadChatAttachment = asyncHandler(async (req, res) => {
   const conversationId = req.params.id;
   const { originalName, mimeType, fileSize, fileType, encryptedFileKey, fileIv, replyTo } = req.body;
 
+  // Which key encrypted the file (sent as JSON in the multipart form)
+  let keyRef;
+  if (req.body.keyRef) {
+    let parsedRef;
+    try {
+      parsedRef = JSON.parse(String(req.body.keyRef).slice(0, 200));
+    } catch {
+      throw new ApiError(400, "Invalid keyRef");
+    }
+    keyRef = require("../services/groupKeys.service").parseKeyRef(parsedRef, req.conversation);
+  }
+
   if (!originalName) throw new ApiError(400, "originalName is required");
   if (!encryptedFileKey || !fileIv) throw new ApiError(400, "encryptedFileKey and fileIv are required");
+  if (String(originalName).length > 200 || String(mimeType || "").length > 100 || String(encryptedFileKey).length > 1000 || String(fileIv).length > 64) {
+    throw new ApiError(400, "File details are too long");
+  }
+  await require("./chat.controller").assertReplyInConversation(replyTo, conversationId);
 
   // Verify membership
   const conv = await Conversation.findOne({
@@ -106,7 +122,8 @@ const uploadChatAttachment = asyncHandler(async (req, res) => {
     ciphertext: null, // no text ciphertext for pure file messages
     iv: null,
     attachments: [attachmentMeta],
-    replyTo: replyTo || null
+    replyTo: replyTo || null,
+    keyRef
   });
 
   await message.populate("sender", "name avatarUrl");
@@ -123,6 +140,9 @@ const uploadChatAttachment = asyncHandler(async (req, res) => {
   if (io) {
     io.to(`conv:${conversationId}`).emit("chat:message", message);
   }
+
+  await require("../services/sla.service").onMessage({ conversation: conv, sender: req.user });
+  await require("../services/offlineAlerts.service").onStaffMessage({ conversation: conv, sender: req.user });
 
   res.status(201).json(new ApiResponse(201, message, "File uploaded successfully"));
 });

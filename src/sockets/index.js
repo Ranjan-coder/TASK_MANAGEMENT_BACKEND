@@ -8,6 +8,20 @@ const { registerChatEvents, setOnline } = require("./chat.socket");
 
 let io = null;
 
+const readCookie = (header, name) => {
+  for (const part of String(header || "").split(";")) {
+    const [k, ...v] = part.trim().split("=");
+    if (k === name) {
+      try {
+        return decodeURIComponent(v.join("="));
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+};
+
 const initSockets = (httpServer) => {
   io = new Server(httpServer, {
     cors: {
@@ -20,25 +34,47 @@ const initSockets = (httpServer) => {
   // Socket Authentication Handshake
   io.use(async (socket, next) => {
     try {
+      // Browsers attach cookies to WebSocket upgrades from any site and CORS
+      // doesn't apply to them, so only accept our own app's origin.
+      const origin = socket.handshake.headers?.origin;
+      if (origin && origin !== config.clientUrl) {
+        return next(new Error("WebSocket origin not allowed"));
+      }
+
       const token =
         socket.handshake.auth?.token ||
-        socket.handshake.headers?.authorization?.split(" ")[1];
+        socket.handshake.headers?.authorization?.split(" ")[1] ||
+        readCookie(socket.handshake.headers?.cookie, "accessToken");
 
       if (!token) {
         return next(new Error("Authentication token required for WebSocket"));
       }
 
       const decoded = jwt.verify(token, config.jwt.accessSecret);
+      if (decoded.stage) {
+        return next(new Error("WebSocket authentication failed"));
+      }
       const user = await User.findById(decoded.userId);
-      if (!user || user.status === "suspended") {
+      if (!user || user.status === "suspended" || user.status === "inactive") {
         return next(new Error("User account unavailable or suspended"));
       }
 
       if (decoded.tokenVersion !== undefined && decoded.tokenVersion !== user.tokenVersion) {
         return next(new Error("Session revoked"));
       }
+      if (!decoded.sid || !(user.currentSessions || []).some((sess) => sess.sessionId === decoded.sid)) {
+        return next(new Error("Session revoked"));
+      }
+
+      // Same gates as the REST API (forced password change, required 2FA for privileged accounts)
+      const { evaluateAccess } = require("../middlewares/accessPolicy");
+      const gate = evaluateAccess({ user, method: "GET", originalUrl: "/api/v1/chat/conversations" });
+      if (!gate.allowed && gate.code !== "ROLE_SCOPE_DENIED") {
+        return next(new Error("Complete your account setup first"));
+      }
 
       socket.user = user;
+      socket.data.sessionId = decoded.sid;
       next();
     } catch (err) {
       next(new Error("WebSocket authentication failed"));
@@ -95,4 +131,13 @@ const initSockets = (httpServer) => {
 
 const getIO = () => io;
 
-module.exports = { initSockets, getIO };
+/** Closes live connections of signed-out sessions (all of the user's if no sessionId). */
+const disconnectSessions = async (userId, sessionIds = null) => {
+  if (!io) return;
+  const sockets = await io.in(`user:${userId}`).fetchSockets();
+  for (const s of sockets) {
+    if (!sessionIds || sessionIds.includes(s.data?.sessionId)) s.disconnect(true);
+  }
+};
+
+module.exports = { initSockets, getIO, disconnectSessions };

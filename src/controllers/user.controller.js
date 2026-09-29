@@ -1,23 +1,43 @@
-const crypto = require("crypto");
 const User = require("../models/User");
 const ApiError = require("../utils/ApiError");
 const ApiResponse = require("../utils/ApiResponse");
 const asyncHandler = require("../utils/asyncHandler");
 const { recordAuditLog } = require("../services/audit.service");
+const { ROLES, ALL_ROLES, ADMIN_ROLES, ADMIN_MANAGEABLE_ROLES } = require("../config/roles");
+
+// Escape user input before using it inside a RegExp (prevents regex injection / ReDoS)
+const escapeRegex = (value) => String(value).slice(0, 100).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const isAdminRole = (role) => ADMIN_ROLES.includes(role);
+
+/**
+ * An admin may only manage user/marketing/customer accounts; only a superadmin
+ * may manage admins. Nobody manages superadmins through these endpoints except
+ * another superadmin (and never themselves, to avoid accidental lockout).
+ */
+const assertCanManage = (actor, target) => {
+  if (actor._id.toString() === target._id.toString()) {
+    throw new ApiError(400, "Use your profile settings to change your own account");
+  }
+  if (actor.role === ROLES.SUPERADMIN) return;
+  if (actor.role === ROLES.ADMIN && ADMIN_MANAGEABLE_ROLES.includes(target.role)) return;
+  throw new ApiError(403, "You do not have permission to manage this account");
+};
 
 const getAllUsers = asyncHandler(async (req, res) => {
-  const page = parseInt(req.query.page, 10) || 1;
-  const limit = parseInt(req.query.limit, 10) || 20;
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
   const skip = (page - 1) * limit;
 
   const query = {};
-  if (req.query.role) query.role = req.query.role;
-  if (req.query.status) query.status = req.query.status;
-  if (req.query.department) query.department = req.query.department;
-  if (req.query.search) {
+  if (typeof req.query.role === "string" && ALL_ROLES.includes(req.query.role)) query.role = req.query.role;
+  if (typeof req.query.status === "string") query.status = req.query.status;
+  if (typeof req.query.department === "string") query.department = req.query.department;
+  if (typeof req.query.search === "string" && req.query.search.trim()) {
+    const safe = escapeRegex(req.query.search.trim());
     query.$or = [
-      { name: { $regex: req.query.search, $options: "i" } },
-      { email: { $regex: req.query.search, $options: "i" } }
+      { name: { $regex: safe, $options: "i" } },
+      { email: { $regex: safe, $options: "i" } }
     ];
   }
 
@@ -37,6 +57,11 @@ const getAllUsers = asyncHandler(async (req, res) => {
 });
 
 const getUserById = asyncHandler(async (req, res) => {
+  // IDOR guard: only the account owner or an admin may read a full user profile
+  if (req.params.id !== req.user._id.toString() && !isAdminRole(req.user.role)) {
+    throw new ApiError(403, "You do not have permission to view this user");
+  }
+
   const user = await User.findById(req.params.id).select("-refreshTokens");
   if (!user) {
     throw new ApiError(404, "User not found");
@@ -45,17 +70,31 @@ const getUserById = asyncHandler(async (req, res) => {
 });
 
 const updateUser = asyncHandler(async (req, res) => {
-  const { name, department, designation, avatarUrl } = req.body;
+  const { name, department, designation, avatarUrl, availability } = req.body;
+
+  const target = await User.findById(req.params.id);
+  if (!target) {
+    throw new ApiError(404, "User not found");
+  }
+  assertCanManage(req.user, target);
+
+  const updateData = {};
+  if (name !== undefined) updateData.name = name;
+  if (department !== undefined) updateData.department = department;
+  if (designation !== undefined) updateData.designation = designation;
+  if (avatarUrl !== undefined) updateData.avatarUrl = avatarUrl;
+  if (availability !== undefined && target.role !== ROLES.CUSTOMER) {
+    updateData.availability = {
+      status: availability.status,
+      until: availability.status === "on_leave" ? availability.until || null : null
+    };
+  }
 
   const user = await User.findByIdAndUpdate(
     req.params.id,
-    { $set: { name, department, designation, avatarUrl } },
+    { $set: updateData },
     { new: true, runValidators: true }
   ).select("-refreshTokens");
-
-  if (!user) {
-    throw new ApiError(404, "User not found");
-  }
 
   await recordAuditLog({
     req,
@@ -70,15 +109,22 @@ const updateUser = asyncHandler(async (req, res) => {
 
 const updateUserRole = asyncHandler(async (req, res) => {
   const { role } = req.body;
-  if (!["superadmin", "admin", "user"].includes(role)) {
+  if (!ALL_ROLES.includes(role)) {
     throw new ApiError(400, "Invalid role specified");
   }
 
+  const target = await User.findById(req.params.id);
+  if (!target) {
+    throw new ApiError(404, "User not found");
+  }
+  assertCanManage(req.user, target);
+
   const user = await User.findByIdAndUpdate(
     req.params.id,
-    { $set: { role }, $inc: { tokenVersion: 1 } }, // invalidate sessions upon role change
+    { $set: { role, currentSessions: [], refreshTokens: [] }, $inc: { tokenVersion: 1 } }, // role change signs them out everywhere
     { new: true }
   ).select("-refreshTokens");
+  await require("../sockets").disconnectSessions(req.params.id);
 
   if (!user) {
     throw new ApiError(404, "User not found");
@@ -101,15 +147,24 @@ const updateUserStatus = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Invalid status specified");
   }
 
+  const target = await User.findById(req.params.id);
+  if (!target) {
+    throw new ApiError(404, "User not found");
+  }
+  assertCanManage(req.user, target);
+
+  // Suspending or deactivating signs the person out everywhere, including open live connections
+  const signOut = status !== "active";
   const user = await User.findByIdAndUpdate(
     req.params.id,
-    { $set: { status }, $inc: { tokenVersion: 1 } },
+    { $set: { status, ...(signOut && { currentSessions: [], refreshTokens: [] }) }, $inc: { tokenVersion: 1 } },
     { new: true }
   ).select("-refreshTokens");
 
   if (!user) {
     throw new ApiError(404, "User not found");
   }
+  if (signOut) await require("../sockets").disconnectSessions(user._id);
 
   await recordAuditLog({
     req,
@@ -123,11 +178,11 @@ const updateUserStatus = asyncHandler(async (req, res) => {
 });
 
 const createUser = asyncHandler(async (req, res) => {
-  const { name, email, password, role, department, designation } = req.body;
+  const { name, email, authKey, kdfSalt, role, department, designation } = req.body;
 
-  // Admins can only create regular users; Super Admins can create any role
-  if (req.user.role === "admin" && role && role !== "user") {
-    throw new ApiError(403, "Admins can only create accounts with 'user' role");
+  // Admins can create user/marketing/customer accounts; only Super Admins can create admins
+  if (req.user.role === ROLES.ADMIN && role && !ADMIN_MANAGEABLE_ROLES.includes(role)) {
+    throw new ApiError(403, "Admins can only create user, marketing or customer accounts");
   }
 
   const existingUser = await User.findOne({ email });
@@ -135,15 +190,19 @@ const createUser = asyncHandler(async (req, res) => {
     throw new ApiError(409, "A user with this email already exists");
   }
 
-  const user = await User.create({
+  const user = new User({
     name,
     email,
-    password: password || crypto.randomBytes(16).toString("hex"), // temp password if not provided
-    role: role || "user",
+    role: role || ROLES.USER,
     department,
     designation,
-    createdBy: req.user._id
+    createdBy: req.user._id,
+    // The admin knows the initial password, so the user must replace it before
+    // their chat keys are created (the admin could otherwise derive the wrapKey)
+    mustChangePassword: true
   });
+  user.setDerivedCredential(authKey, kdfSalt);
+  await user.save();
 
   await recordAuditLog({
     req,
@@ -188,12 +247,28 @@ const deleteUser = asyncHandler(async (req, res) => {
 });
 
 const updateProfile = asyncHandler(async (req, res) => {
-  const { name, department, designation, avatarUrl } = req.body;
+  const { name, department, designation, avatarUrl, availability, notificationPrefs } = req.body;
   const updateData = {};
+  if (notificationPrefs !== undefined && req.user.role === ROLES.CUSTOMER) {
+    if ((notificationPrefs.whatsapp || notificationPrefs.sms) && !req.user.phoneVerified) {
+      throw new ApiError(400, "Verify your mobile number first");
+    }
+    updateData.notificationPrefs = { ...notificationPrefs, updatedAt: new Date() };
+  }
   if (name !== undefined) updateData.name = name;
-  if (department !== undefined) updateData.department = department;
-  if (designation !== undefined) updateData.designation = designation;
   if (avatarUrl !== undefined) updateData.avatarUrl = avatarUrl;
+  // Customers cannot set department/designation — otherwise a customer could
+  // label themselves "Bonito Manager" and impersonate staff in chat.
+  if (req.user.role !== ROLES.CUSTOMER) {
+    if (department !== undefined) updateData.department = department;
+    if (designation !== undefined) updateData.designation = designation;
+  }
+  if (availability !== undefined && req.user.role !== ROLES.CUSTOMER) {
+    updateData.availability = {
+      status: availability.status,
+      until: availability.status === "on_leave" ? availability.until || null : null
+    };
+  }
 
   const user = await User.findByIdAndUpdate(
     req.user._id,

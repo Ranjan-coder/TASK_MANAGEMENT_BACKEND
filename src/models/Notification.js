@@ -24,6 +24,13 @@ const notificationSchema = new mongoose.Schema(
         "task_completed",
         "account_created",
         "security_alert",
+        "consultation_request",
+        "project_update",
+        "sla_reminder",
+        "sla_escalated",
+        "report_update",
+        "rating_alert",
+        "moderation_alert",
         "attachment_added",
         "link_added"
       ],
@@ -40,6 +47,11 @@ const notificationSchema = new mongoose.Schema(
     relatedTask: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Task",
+      default: null
+    },
+    relatedConversation: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Conversation",
       default: null
     },
     relatedComment: {

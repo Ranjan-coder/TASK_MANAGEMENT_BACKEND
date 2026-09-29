@@ -34,6 +34,7 @@ const findOrCreateDM = async (userId, targetUserId) => {
  * Create a new group conversation.
  */
 const createGroup = async ({ name, creatorId, memberIds, encryptedGroupKeys }) => {
+  const { buildInitialKeyring } = require("./groupKeys.service");
   if (!name || !name.trim()) throw new ApiError(400, "Group name is required");
 
   // Deduplicate and ensure creator is included
@@ -45,15 +46,15 @@ const createGroup = async ({ name, creatorId, memberIds, encryptedGroupKeys }) =
     role: uid === creatorId.toString() ? "admin" : "member"
   }));
 
-  // encryptedGroupKeys: { [userId]: base64EncodedEncryptedKey }
-  const groupKeys = new Map(Object.entries(encryptedGroupKeys || {}));
+  // encryptedGroupKeys: { [userId]: { wrapped, wrapperKeyVersion, recipientKeyVersion } } → key version 1
+  const groupKeyring = buildInitialKeyring({ keys: encryptedGroupKeys, creatorId, memberIdList: uniqueIds });
 
   const conversation = await Conversation.create({
     type: "group",
     name: name.trim(),
     createdBy: creatorId,
     members,
-    groupKeys
+    groupKeyring
   });
 
   return conversation;
@@ -126,7 +127,7 @@ const getUserConversations = async (userId) => {
 /**
  * Save a new message (server only stores ciphertext + iv — never plaintext).
  */
-const saveMessage = async ({ conversationId, senderId, type, ciphertext, iv, content, attachments, replyTo }) => {
+const saveMessage = async ({ conversationId, senderId, type, ciphertext, iv, content, attachments, replyTo, keyRef, franking, moderation }) => {
   const message = await Message.create({
     conversation: conversationId,
     sender: senderId,
@@ -135,7 +136,10 @@ const saveMessage = async ({ conversationId, senderId, type, ciphertext, iv, con
     iv: iv || null,
     content: type === "system" ? content : null, // only plain for system messages
     attachments: attachments || [],
-    replyTo: replyTo || null
+    replyTo: replyTo || null,
+    keyRef,
+    franking,
+    moderation
   });
 
   // Update conversation's lastMessage + lastActivityAt
@@ -290,6 +294,29 @@ const deleteMessageForEveryone = async (messageId, userId) => {
     throw new ApiError(403, "Messages can only be deleted for everyone within 10 minutes of sending");
   }
 
+  // A design sign-off must stay checkable
+  if (await require("./projectExtras.service").hasApproval(message._id)) {
+    throw new ApiError(409, "This design has an approval request, so it can't be deleted");
+  }
+
+  // Project chats: keep the original (still encrypted) for report reviews
+  const conv = await Conversation.findById(message.conversation).select("project");
+  if (conv?.project) {
+    await require("../models/MessageEvidence").create({
+      message: message._id,
+      conversation: message.conversation,
+      sender: message.sender,
+      reason: "deleted",
+      ciphertext: message.ciphertext,
+      iv: message.iv,
+      keyRef: message.keyRef,
+      franking: message.franking,
+      attachments: message.attachments,
+      originalCreatedAt: message.createdAt,
+      actor: userId
+    });
+  }
+
   message.isDeleted = true;
   message.ciphertext = null;
   message.iv = null;
@@ -320,7 +347,7 @@ const deleteMessageForMe = async (messageId, userId) => {
  * Add a member to a group (admin only). Caller must provide the new
  * member's encrypted group key copy.
  */
-const addGroupMember = async ({ conversationId, requesterId, newUserId, encryptedGroupKey }) => {
+const addGroupMember = async ({ conversationId, requesterId, newUserId }) => {
   const conversation = await Conversation.findById(conversationId);
   if (!conversation || conversation.type !== "group") throw new ApiError(404, "Group not found");
 
@@ -331,9 +358,6 @@ const addGroupMember = async ({ conversationId, requesterId, newUserId, encrypte
   if (alreadyMember) throw new ApiError(409, "User is already a member");
 
   conversation.members.push({ user: newUserId, role: "member" });
-  if (encryptedGroupKey) {
-    conversation.groupKeys.set(newUserId.toString(), encryptedGroupKey);
-  }
   await conversation.save();
   return conversation;
 };
@@ -354,30 +378,12 @@ const removeGroupMember = async ({ conversationId, requesterId, targetUserId }) 
   }
 
   conversation.members = conversation.members.filter((m) => m.user.toString() !== targetUserId.toString());
-  conversation.groupKeys.delete(targetUserId.toString());
+  require("./groupKeys.service").dropMemberKeys(conversation, targetUserId);
 
   if (conversation.members.length === 0) {
     conversation.isArchived = true;
   }
 
-  await conversation.save();
-  return conversation;
-};
-
-/**
- * Update group keys after re-keying (called after member removal for forward secrecy).
- * newGroupKeys: { [userId]: base64EncryptedKey }
- */
-const updateGroupKeys = async (conversationId, newGroupKeys, requesterId) => {
-  const conversation = await Conversation.findById(conversationId);
-  if (!conversation) throw new ApiError(404, "Conversation not found");
-
-  const requester = conversation.members.find((m) => m.user.toString() === requesterId.toString());
-  if (!requester || requester.role !== "admin") throw new ApiError(403, "Only admins can rotate group keys");
-
-  for (const [uid, encKey] of Object.entries(newGroupKeys)) {
-    conversation.groupKeys.set(uid, encKey);
-  }
   await conversation.save();
   return conversation;
 };
@@ -394,6 +400,5 @@ module.exports = {
   deleteMessageForEveryone,
   deleteMessageForMe,
   addGroupMember,
-  removeGroupMember,
-  updateGroupKeys
+  removeGroupMember
 };

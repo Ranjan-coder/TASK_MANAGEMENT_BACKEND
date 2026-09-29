@@ -18,6 +18,9 @@ const startServer = async () => {
   // Initialize Socket.io
   initSockets(server);
 
+  // Reply timers for project chats (needs the database, not Redis)
+  require("./jobs/slaMonitor.job").startSlaMonitor();
+
   server.listen(config.port, () => {
     logger.info(`Server running in ${config.env} mode on port ${config.port}`);
     logger.info(`REST API Base: http://localhost:${config.port}/api/v1`);

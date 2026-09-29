@@ -66,6 +66,45 @@ const messageSchema = new mongoose.Schema(
       default: null
     },
 
+    // Message franking (text messages): the sender's app commits to the text
+    // with HMAC(frankingKey, text); the key travels inside the ciphertext.
+    // serverTag binds the commitment to sender, chat and time so a reported
+    // message can be proven genuine without the server reading any others.
+    franking: {
+      type: {
+        commitment: { type: String },
+        serverTag: { type: String },
+        serverTs: { type: Date }
+      },
+      default: undefined,
+      _id: false
+    },
+
+    // Abuse check done on the sender's device (project chats): set when the
+    // sender chose "Send anyway". Counts only — the words stay encrypted.
+    moderation: {
+      type: {
+        flagged: { type: Boolean },
+        severity: { type: String, enum: ["mild", "abusive", "threat"] },
+        hitCount: { type: Number, min: 0, max: 20 }
+      },
+      default: undefined,
+      _id: false
+    },
+
+    // Which key encrypted this message (absent on messages sent before versioning):
+    //  - groups: g = group key version
+    //  - DMs:    s / r = sender / recipient public key versions used for ECDH
+    keyRef: {
+      type: {
+        g: { type: Number, min: 0 },
+        s: { type: Number, min: 0 },
+        r: { type: Number, min: 0 }
+      },
+      default: undefined,
+      _id: false
+    },
+
     attachments: [attachmentSchema],
 
     // Reply-to reference

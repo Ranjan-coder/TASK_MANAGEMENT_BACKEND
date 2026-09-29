@@ -8,93 +8,137 @@ const asyncHandler = require("../utils/asyncHandler");
 const authService = require("../services/auth.service");
 const twoFactorService = require("../services/twoFactor.service");
 const { recordAuditLog } = require("../services/audit.service");
+const { ROLES } = require("../config/roles");
+const { normalizeIndianMobile, looksLikeEmail } = require("../utils/phone");
+const { startPhoneVerification, sanitizeUser } = require("../services/customerAuth.service");
+const { kdfParams, fakeSalt, newSalt } = require("../utils/kdf");
+const { disconnectSessions } = require("../sockets");
 
-const register = asyncHandler(async (req, res) => {
-  const { name, email, password, role, department, designation } = req.body;
+/** One canonical form per identifier (so "9876543210" and "+91 98765 43210" behave the same). */
+const canonicalIdentifier = (identifier) =>
+  looksLikeEmail(identifier) ? String(identifier).trim().toLowerCase() : normalizeIndianMobile(identifier) || String(identifier).trim().toLowerCase();
 
-  const existingUser = await User.findOne({ email });
-  if (existingUser) {
-    throw new ApiError(409, "User with this email already exists");
+// Used when an account doesn't exist, so a wrong guess costs the same time as a real check
+const DUMMY_HASH = require("bcryptjs").hashSync("bonito-timing-equaliser", 12);
+const SIGN_IN_FAILED = "Invalid credentials. After several failed attempts, sign-in is paused for 15 minutes.";
+
+/** Finds a user by email or verified mobile number. */
+const findByIdentifier = async (identifier, select) => {
+  if (looksLikeEmail(identifier)) return User.findOne({ email: identifier.toLowerCase() }).select(select);
+  const phone = normalizeIndianMobile(identifier);
+  return phone ? User.findOne({ phone }).select(select) : null;
+};
+
+/**
+ * POST /auth/prelogin
+ * Returns the key-derivation parameters the browser needs before login.
+ * Unknown identifiers get a deterministic fake salt, so the response doesn't
+ * reveal whether an account exists. `legacy: true` asks the client to also
+ * send the raw password once, to migrate an account created before this scheme.
+ */
+const prelogin = asyncHandler(async (req, res) => {
+  const { identifier } = req.body;
+  const user = await findByIdentifier(identifier, "kdf authScheme");
+
+  if (!user) {
+    return res.status(200).json(new ApiResponse(200, { kdf: kdfParams(fakeSalt(canonicalIdentifier(identifier))), legacy: false }));
   }
 
-  const user = await User.create({
-    name,
-    email,
-    password,
-    role: role || "user",
-    department,
-    designation,
-    createdBy: req.user?._id || null
-  });
+  if (!user.kdf?.salt) {
+    // First contact since the scheme was introduced: assign a salt now so the
+    // client can derive the new authKey during this login.
+    user.kdf = kdfParams(newSalt());
+    await user.save({ validateBeforeSave: false });
+  }
 
-  await recordAuditLog({
-    req,
-    action: "user_registered",
-    targetType: "User",
-    targetId: user._id,
-    metadata: { email, role: user.role }
-  });
-
-  const userResponse = user.toObject();
-  delete userResponse.password;
-
-  res.status(201).json(new ApiResponse(201, userResponse, "User registered successfully"));
+  res.status(200).json(
+    new ApiResponse(200, {
+      kdf: { algorithm: user.kdf.algorithm, iterations: user.kdf.iterations, salt: user.kdf.salt },
+      legacy: user.authScheme !== "derived"
+    })
+  );
 });
 
-const login = asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
+/** GET /auth/kdf — own derivation parameters (to unlock chat keys or change password). */
+const getOwnKdf = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user._id).select("kdf authScheme");
+  const kdf = user.kdf?.salt
+    ? { algorithm: user.kdf.algorithm, iterations: user.kdf.iterations, salt: user.kdf.salt }
+    : null;
+  res.status(200).json(new ApiResponse(200, { kdf, legacy: user.authScheme !== "derived" }));
+});
 
-  const user = await User.findOne({ email }).select(
-    "+password +twoFactorSecret +failedLoginAttempts +lockUntil +refreshTokens"
+/**
+ * POST /auth/login
+ * Email or verified phone + authKey. Customers whose phone is not verified get
+ * a phone-verification step instead of a session.
+ */
+const login = asyncHandler(async (req, res) => {
+  const { identifier, authKey, password, trustDevice } = req.body;
+  const trusted = trustDevice !== false;
+
+  const user = await findByIdentifier(
+    identifier,
+    "+password +twoFactorSecret +failedLoginAttempts +lockUntil +refreshTokens +pendingPhone"
   );
 
   if (!user) {
-    throw new ApiError(401, "Invalid email or password");
+    await require("bcryptjs").compare(String(authKey || password || ""), DUMMY_HASH);
+    throw new ApiError(401, SIGN_IN_FAILED);
   }
 
+  // Same answer as a wrong password, so it doesn't reveal that the account exists
   if (user.isLocked()) {
-    throw new ApiError(423, "Account is temporarily locked due to failed attempts. Try again later.");
+    throw new ApiError(401, SIGN_IN_FAILED);
   }
 
+  const isLegacy = user.authScheme !== "derived";
+  if (isLegacy && !password) {
+    throw new ApiError(400, "Please sign in again to upgrade your account security.", [
+      { code: "LEGACY_PASSWORD_REQUIRED" }
+    ]);
+  }
+
+  const valid = await user.verifyCredential({ authKey, password });
+  if (!valid) {
+    await user.incrementLoginAttempts();
+    throw new ApiError(401, SIGN_IN_FAILED);
+  }
+
+  // Account status is only revealed to someone who knows the password
   if (user.status === "suspended" || user.status === "inactive") {
     throw new ApiError(403, `Your account is ${user.status}. Contact administrator.`);
   }
 
-  const isPasswordValid = await user.comparePassword(password);
-  if (!isPasswordValid) {
-    await user.incrementLoginAttempts();
-    throw new ApiError(401, "Invalid email or password");
+  await user.resetLoginAttempts();
+
+  // One-time migration: replace bcrypt(password) with bcrypt(authKey)
+  if (isLegacy) {
+    if (!user.kdf?.salt) throw new ApiError(400, "Please sign in again.", [{ code: "PRELOGIN_REQUIRED" }]);
+    user.setDerivedCredential(authKey, user.kdf.salt);
+    await user.save();
+    await recordAuditLog({ req, actorId: user._id, action: "auth_scheme_migrated", targetType: "User", targetId: user._id });
   }
 
-  await user.resetLoginAttempts();
+  // Customers must verify their mobile number before getting a session
+  if (user.role === ROLES.CUSTOMER && !user.phoneVerified) {
+    const verification = await startPhoneVerification(req, user, { trusted });
+    return res.status(200).json(
+      new ApiResponse(200, { requiresPhoneVerification: true, ...verification }, "Verify your mobile number to continue")
+    );
+  }
 
   // If 2FA is enabled
   if (user.isTwoFactorEnabled) {
-    const tempToken = jwt.sign(
-      { userId: user._id, stage: "2fa_pending" },
-      config.jwt.accessSecret,
-      { expiresIn: "5m" }
-    );
+    const jti = crypto.randomBytes(16).toString("hex");
+    await User.updateOne({ _id: user._id }, { $set: { twoFactorStepJti: jti } });
+    const tempToken = authService.signStepToken(user._id, "2fa_pending", "5m", { trusted, jti });
     return res.status(200).json(
       new ApiResponse(200, { requires2FA: true, tempToken }, "2FA verification required")
     );
   }
 
-  const { accessToken, refreshToken } = authService.generateTokens(user);
-  const hashedRefreshToken = authService.hashToken(refreshToken);
-
-  const sessionId = crypto.randomUUID();
-  const ipAddress = req.ip || req.headers["x-forwarded-for"] || "unknown";
-  const device = req.headers["user-agent"] || "unknown device";
-
-  user.refreshTokens = user.refreshTokens || [];
-  user.currentSessions = user.currentSessions || [];
-  user.refreshTokens.push(hashedRefreshToken);
-  user.lastLogin = new Date();
-  user.currentSessions.push({ sessionId, device, ipAddress, lastActive: new Date() });
-  await user.save();
-
-  authService.setTokenCookies(res, accessToken, refreshToken);
+  const { accessToken } = await authService.issueSession(req, res, user, { trusted });
 
   await recordAuditLog({
     req,
@@ -104,45 +148,37 @@ const login = asyncHandler(async (req, res) => {
     targetId: user._id
   });
 
-  const userObj = user.toObject();
-  delete userObj.password;
-  delete userObj.twoFactorSecret;
-
-  res.status(200).json(new ApiResponse(200, { user: userObj, accessToken }, "Login successful"));
+  res.status(200).json(new ApiResponse(200, { user: sanitizeUser(user) }, "Login successful"));
 });
 
 const verify2FA = asyncHandler(async (req, res) => {
   const { tempToken, code } = req.body;
 
-  let decoded;
-  try {
-    decoded = jwt.verify(tempToken, config.jwt.accessSecret);
-    if (decoded.stage !== "2fa_pending") {
-      throw new Error();
-    }
-  } catch {
-    throw new ApiError(401, "Invalid or expired 2FA session token");
-  }
+  const decoded = authService.verifyStepToken(tempToken, "2fa_pending");
 
-  const user = await User.findById(decoded.userId).select("+twoFactorSecret +refreshTokens");
+  const user = await User.findById(decoded.userId).select("+twoFactorSecret +refreshTokens +failedLoginAttempts +lockUntil +twoFactorLastCode");
   if (!user || !user.twoFactorSecret) {
     throw new ApiError(400, "2FA is not configured for this account");
   }
-
-  const isValid = twoFactorService.verify2FAToken(code, user.twoFactorSecret);
-  if (!isValid) {
-    throw new ApiError(401, "Invalid 2FA authentication code");
+  if (user.status === "suspended" || user.status === "inactive") {
+    throw new ApiError(403, `Your account is ${user.status}. Contact administrator.`);
+  }
+  if (user.isLocked()) throw new ApiError(401, SIGN_IN_FAILED);
+  // Each sign-in's 2FA step works once
+  if (decoded.jti && user.twoFactorStepJti && user.twoFactorStepJti !== decoded.jti) {
+    throw new ApiError(401, "Please sign in again.");
   }
 
-  const { accessToken, refreshToken } = authService.generateTokens(user);
-  const hashedRefreshToken = authService.hashToken(refreshToken);
+  const isValid = twoFactorService.verify2FAToken(code, user.twoFactorSecret);
+  const codeKey = crypto.createHash("sha256").update(`${user._id}:${code}`).digest("hex");
+  if (!isValid || user.twoFactorLastCode === codeKey) {
+    // Wrong (or replayed) codes count toward the same lock as wrong passwords
+    await user.incrementLoginAttempts();
+    throw new ApiError(401, "Invalid 2FA authentication code");
+  }
+  await User.updateOne({ _id: user._id }, { $set: { twoFactorLastCode: codeKey, twoFactorStepJti: null, failedLoginAttempts: 0 }, $unset: { lockUntil: 1 } });
 
-  user.refreshTokens = user.refreshTokens || [];
-  user.refreshTokens.push(hashedRefreshToken);
-  user.lastLogin = new Date();
-  await user.save();
-
-  authService.setTokenCookies(res, accessToken, refreshToken);
+  const { accessToken } = await authService.issueSession(req, res, user, { trusted: decoded.trusted !== false });
 
   await recordAuditLog({
     req,
@@ -152,15 +188,14 @@ const verify2FA = asyncHandler(async (req, res) => {
     targetId: user._id
   });
 
-  const userObj = user.toObject();
-  delete userObj.password;
-  delete userObj.twoFactorSecret;
-
-  res.status(200).json(new ApiResponse(200, { user: userObj, accessToken }, "2FA verified successfully"));
+  res.status(200).json(new ApiResponse(200, { user: sanitizeUser(user) }, "2FA verified successfully"));
 });
 
 const setup2FA = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user._id);
+  if (user.isTwoFactorEnabled) {
+    throw new ApiError(409, "Two-factor sign-in is already on. Turn it off first (needs your password and a current code).", [{ code: "TWO_FACTOR_ACTIVE" }]);
+  }
   const { secret, encryptedSecret, qrCodeUrl, recoveryCodes, hashedCodes } =
     await twoFactorService.generate2FASecret(user.email);
 
@@ -216,39 +251,31 @@ const refreshToken = asyncHandler(async (req, res) => {
   } catch {
     throw new ApiError(401, "Invalid or expired refresh token");
   }
-
-  const hashedToken = authService.hashToken(incomingRefreshToken);
-  const user = await User.findById(decoded.userId).select("+refreshTokens +tokenVersion");
-
-  if (!user || !user.refreshTokens.includes(hashedToken)) {
-    throw new ApiError(401, "Refresh token is invalid or has been reused");
+  if (!decoded.sid) {
+    throw new ApiError(401, "Please sign in again.", [{ code: "DEVICE_SIGNED_OUT" }]);
   }
 
-  // Token version verification
+  const user = await User.findById(decoded.userId).select("+tokenVersion");
+  if (!user) {
+    throw new ApiError(401, "Refresh token is invalid");
+  }
+  if (user.status === "suspended" || user.status === "inactive") {
+    throw new ApiError(403, `Account is currently ${user.status}. Access denied.`);
+  }
+
+  // Token version verification (password reset / "sign out everywhere")
   if (decoded.tokenVersion !== undefined && decoded.tokenVersion !== user.tokenVersion) {
     throw new ApiError(401, "Session revoked");
   }
 
-  // Rotate token: Remove old hash, create new pair
-  user.refreshTokens = user.refreshTokens.filter((t) => t !== hashedToken);
-  const tokens = authService.generateTokens(user);
-  user.refreshTokens.push(authService.hashToken(tokens.refreshToken));
-  await user.save();
-
-  authService.setTokenCookies(res, tokens.accessToken, tokens.refreshToken);
-
-  res.status(200).json(
-    new ApiResponse(200, { accessToken: tokens.accessToken }, "Token refreshed successfully")
-  );
+  const { accessToken } = await authService.rotateSession(res, user, decoded, incomingRefreshToken);
+  res.status(200).json(new ApiResponse(200, null, "Token refreshed successfully"));
 });
 
 const logout = asyncHandler(async (req, res) => {
-  const incomingRefreshToken = req.cookies?.refreshToken;
-  if (incomingRefreshToken && req.user) {
-    const hashed = authService.hashToken(incomingRefreshToken);
-    await User.findByIdAndUpdate(req.user._id, {
-      $pull: { refreshTokens: hashed }
-    });
+  if (req.user && req.sessionId) {
+    await User.updateOne({ _id: req.user._id }, { $pull: { currentSessions: { sessionId: req.sessionId } } });
+    disconnectSessions(req.user._id, [req.sessionId]).catch(() => {});
   }
 
   authService.clearTokenCookies(res);
@@ -259,12 +286,14 @@ const getMe = asyncHandler(async (req, res) => {
   res.status(200).json(new ApiResponse(200, req.user, "Current user profile fetched"));
 });
 
+/** Signs out every device, including this one. */
 const revokeAllSessions = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user._id);
   user.tokenVersion += 1;
   user.refreshTokens = [];
   user.currentSessions = [];
   await user.save();
+  disconnectSessions(user._id).catch(() => {});
 
   authService.clearTokenCookies(res);
 
@@ -278,20 +307,44 @@ const revokeAllSessions = asyncHandler(async (req, res) => {
   res.status(200).json(new ApiResponse(200, null, "All sessions have been revoked"));
 });
 
-const disable2FA = asyncHandler(async (req, res) => {
-  const { password } = req.body;
-  const user = await User.findById(req.user._id).select("+password +twoFactorSecret");
+/** Signs out every device except the one making the request. */
+const revokeOtherSessions = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user._id);
+  const others = user.currentSessions.filter((s) => s.sessionId !== req.sessionId).map((s) => s.sessionId);
+  user.currentSessions = user.currentSessions.filter((s) => s.sessionId === req.sessionId);
+  await user.save();
+  disconnectSessions(user._id, others).catch(() => {});
 
-  const isPasswordValid = await user.comparePassword(password);
-  if (!isPasswordValid) {
-    throw new ApiError(401, "Invalid password. Cannot disable 2FA.");
+  await recordAuditLog({
+    req,
+    action: "other_sessions_revoked",
+    targetType: "User",
+    targetId: user._id,
+    metadata: { count: others.length }
+  });
+
+  res.status(200).json(new ApiResponse(200, { signedOut: others.length }, "Other devices signed out"));
+});
+
+const disable2FA = asyncHandler(async (req, res) => {
+  const { authKey, password, code } = req.body;
+  const user = await User.findById(req.user._id).select("+password +twoFactorSecret +failedLoginAttempts +lockUntil");
+  if (user.isLocked()) throw new ApiError(401, SIGN_IN_FAILED);
+
+  const isPasswordValid = await user.verifyCredential({ authKey, password });
+  const codeValid = Boolean(user.twoFactorSecret) && twoFactorService.verify2FAToken(code, user.twoFactorSecret);
+  if (!isPasswordValid || !codeValid) {
+    await user.incrementLoginAttempts(); // guesses count toward the account lock
+    throw new ApiError(401, "Wrong password or code. 2FA is still on.");
   }
 
   user.isTwoFactorEnabled = false;
   user.twoFactorSecret = undefined;
   user.twoFactorRecoveryCodes = [];
   user.tokenVersion += 1; // revoke all existing sessions
+  user.currentSessions = [];
   await user.save();
+  await disconnectSessions(user._id);
 
   authService.clearTokenCookies(res);
 
@@ -305,26 +358,38 @@ const disable2FA = asyncHandler(async (req, res) => {
   res.status(200).json(new ApiResponse(200, null, "2FA has been disabled. Please log in again."));
 });
 
+/** Signed-in devices. The refresh token hashes are never sent. */
 const getSessions = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user._id);
-  res.status(200).json(new ApiResponse(200, user.currentSessions, "Active sessions fetched"));
+  res.status(200).json(new ApiResponse(200, authService.describeSessions(user, req.sessionId), "Active sessions fetched"));
 });
 
+/**
+ * Signs out one device: its session (and refresh token) is removed, so its
+ * access token stops working immediately and it can't refresh.
+ */
 const revokeSession = asyncHandler(async (req, res) => {
   const { id: sessionId } = req.params;
-  const user = await User.findById(req.user._id);
-
-  const sessionIndex = user.currentSessions.findIndex(
-    (s) => s.sessionId === sessionId
+  const result = await User.updateOne(
+    { _id: req.user._id, "currentSessions.sessionId": sessionId },
+    { $pull: { currentSessions: { sessionId } } }
   );
-  if (sessionIndex === -1) {
+  if (result.modifiedCount === 0) {
     throw new ApiError(404, "Session not found");
   }
+  disconnectSessions(req.user._id, [sessionId]).catch(() => {});
 
-  user.currentSessions.splice(sessionIndex, 1);
-  await user.save();
+  if (sessionId === req.sessionId) authService.clearTokenCookies(res);
 
-  res.status(200).json(new ApiResponse(200, null, "Session revoked successfully"));
+  await recordAuditLog({
+    req,
+    action: "session_revoked",
+    targetType: "User",
+    targetId: req.user._id,
+    metadata: { sessionId }
+  });
+
+  res.status(200).json(new ApiResponse(200, null, "Device signed out"));
 });
 
 const forgotPassword = asyncHandler(async (req, res) => {
@@ -368,9 +433,15 @@ const forgotPassword = asyncHandler(async (req, res) => {
     .json(new ApiResponse(200, null, "If that email is registered, a reset link has been sent."));
 });
 
+/**
+ * Resets the password with an emailed token. The old key bundle was encrypted
+ * with a key derived from the old password, so it can no longer be opened and
+ * is removed; chat keys are then re-shared by group members or restored from
+ * another device (customer-portal-plan.md §4.3).
+ */
 const resetPassword = asyncHandler(async (req, res) => {
   const { token } = req.params;
-  const { password } = req.body;
+  const { authKey, kdfSalt } = req.body;
 
   const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
 
@@ -383,13 +454,17 @@ const resetPassword = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Password reset token is invalid or has expired");
   }
 
-  user.password = password;
+  user.setDerivedCredential(authKey, kdfSalt);
+  user.keyBundle = undefined;
+  user.mustChangePassword = false;
   user.passwordResetToken = undefined;
   user.passwordResetExpires = undefined;
   user.tokenVersion += 1; // invalidate all active sessions
   user.refreshTokens = [];
   user.currentSessions = [];
   await user.save();
+
+  disconnectSessions(user._id).catch(() => {});
 
   await recordAuditLog({
     req,
@@ -402,8 +477,69 @@ const resetPassword = asyncHandler(async (req, res) => {
   res.status(200).json(new ApiResponse(200, null, "Password reset successful. Please log in."));
 });
 
+/**
+ * Change password for the logged-in user (also clears a forced-change flag).
+ * The browser re-encrypts the chat key bundle with the new wrapKey and sends it
+ * in the same request, so the credential and the bundle never get out of step.
+ * Revokes every other session and issues fresh tokens for this one.
+ */
+const changePassword = asyncHandler(async (req, res) => {
+  const { currentAuthKey, currentPassword, newAuthKey, newKdfSalt, keyBundle } = req.body;
+
+  const user = await User.findById(req.user._id).select("+password +refreshTokens +keyBundle");
+  if (!user) {
+    throw new ApiError(404, "User not found");
+  }
+
+  const isPasswordValid = await user.verifyCredential({ authKey: currentAuthKey, password: currentPassword });
+  if (!isPasswordValid) {
+    await user.incrementLoginAttempts();
+    throw new ApiError(401, "Current password is incorrect");
+  }
+
+  if (user.keyBundle && !keyBundle) {
+    throw new ApiError(400, "Your chat keys must be re-encrypted with the new password. Please try again.", [
+      { code: "KEY_BUNDLE_REQUIRED" }
+    ]);
+  }
+
+  user.setDerivedCredential(newAuthKey, newKdfSalt);
+  if (keyBundle) {
+    user.keyBundle = {
+      ciphertext: keyBundle.ciphertext,
+      iv: keyBundle.iv,
+      version: (user.keyBundle?.version || 0) + 1,
+      updatedAt: new Date()
+    };
+  }
+  const trusted = user.currentSessions.find((s) => s.sessionId === req.sessionId)?.trusted !== false;
+  const signedOut = user.currentSessions.map((s) => s.sessionId);
+  user.mustChangePassword = false;
+  user.tokenVersion += 1;
+  user.refreshTokens = [];
+  user.currentSessions = [];
+
+  // Every other device is signed out; this one gets a fresh session
+  const { accessToken } = await authService.issueSession(req, res, user, { trusted, alert: false });
+  disconnectSessions(user._id, signedOut).catch(() => {});
+
+  await recordAuditLog({
+    req,
+    actorId: user._id,
+    action: "password_changed",
+    targetType: "User",
+    targetId: user._id
+  });
+
+  res
+    .status(200)
+    .json(new ApiResponse(200, { user: sanitizeUser(user) }, "Password changed. Other devices have been signed out."));
+});
+
 module.exports = {
-  register,
+  prelogin,
+  getOwnKdf,
+  changePassword,
   login,
   verify2FA,
   setup2FA,
@@ -415,6 +551,7 @@ module.exports = {
   getSessions,
   revokeSession,
   revokeAllSessions,
+  revokeOtherSessions,
   forgotPassword,
   resetPassword
 };

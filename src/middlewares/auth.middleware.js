@@ -3,6 +3,7 @@ const config = require("../config/env");
 const User = require("../models/User");
 const ApiError = require("../utils/ApiError");
 const asyncHandler = require("../utils/asyncHandler");
+const { evaluateAccess } = require("./accessPolicy");
 
 const authMiddleware = asyncHandler(async (req, res, next) => {
   let token = null;
@@ -27,6 +28,12 @@ const authMiddleware = asyncHandler(async (req, res, next) => {
     return next(new ApiError(401, "Invalid access token"));
   }
 
+  // Short-lived step tokens (2FA pending, phone verification) are signed with the
+  // same secret but must never work as access tokens.
+  if (decoded.stage) {
+    return next(new ApiError(401, "Invalid access token"));
+  }
+
   const user = await User.findById(decoded.userId).select("+tokenVersion");
   if (!user) {
     return next(new ApiError(401, "User belonging to this token no longer exists"));
@@ -39,6 +46,19 @@ const authMiddleware = asyncHandler(async (req, res, next) => {
   // Token version check for instant global revocation
   if (decoded.tokenVersion !== undefined && decoded.tokenVersion !== user.tokenVersion) {
     return next(new ApiError(401, "Session has been revoked. Please log in again."));
+  }
+
+  // Every access token belongs to a device session; a removed session
+  // (signed out from Settings → Devices, or reuse detected) stops working at once.
+  if (!decoded.sid || !(user.currentSessions || []).some((sess) => sess.sessionId === decoded.sid)) {
+    return next(new ApiError(401, "This device has been signed out.", [{ code: "DEVICE_SIGNED_OUT" }]));
+  }
+  req.sessionId = decoded.sid;
+
+  // Deny-by-default role scope, forced password change and privileged-2FA gates
+  const access = evaluateAccess({ user, method: req.method, originalUrl: req.originalUrl });
+  if (!access.allowed) {
+    return next(new ApiError(403, access.message, [{ code: access.code }]));
   }
 
   req.user = user;
