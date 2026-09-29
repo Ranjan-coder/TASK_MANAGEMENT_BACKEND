@@ -22,30 +22,13 @@ const attachmentLimiter = require("../middlewares/rateLimiter.middleware").creat
 });
 const reactionLimiter = require("../middlewares/rateLimiter.middleware").createLimiter({ windowMs: 60 * 1000, max: 60, message: "Too many reactions." });
 
-const messageLimiter = (() => {
-  try {
-    const rateLimit = require("express-rate-limit");
-    const { RedisStore } = require("rate-limit-redis");
-    const redisClient = require("../config/redis");
-    const ApiError = require("../utils/ApiError");
-
-    const options = {
-      windowMs: 60 * 1000,
-      max: 60,
-      standardHeaders: true,
-      legacyHeaders: false,
-      keyGenerator: (req) => `chat:${req.user?._id || req.ip}`,
-      handler: (req, res, next) => next(new ApiError(429, "Message rate limit exceeded. Please slow down."))
-    };
-
-    if (redisClient?.status === "ready") {
-      options.store = new RedisStore({ sendCommand: (...args) => redisClient.call(...args) });
-    }
-    return rateLimit(options);
-  } catch {
-    return (req, res, next) => next(); // fallback: no rate limiting if deps missing
-  }
-})();
+// Shared hybrid store: uses Redis when it's up, memory otherwise (decided per request, not at load).
+const messageLimiter = require("../middlewares/rateLimiter.middleware").createLimiter({
+  windowMs: 60 * 1000,
+  max: 60,
+  message: "Message rate limit exceeded. Please slow down.",
+  keyGenerator: (req) => `chat:${req.user?._id || req.ip}`
+});
 
 // ── Membership guard middleware ───────────────────────────────────────────────
 const requireMembership = asyncHandler(async (req, res, next) => {

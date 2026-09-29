@@ -72,6 +72,7 @@ const uploadChatAttachment = asyncHandler(async (req, res) => {
           const stream = cloudinary.uploader.upload_stream(
             {
               folder: "task_manager/chat_attachments",
+              timeout: 60000,
               resource_type: "raw", // Always raw — file is encrypted binary
               public_id: uniqueId,
               // Tag for easy bulk-deletion later

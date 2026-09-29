@@ -19,7 +19,7 @@ const canonicalIdentifier = (identifier) =>
   looksLikeEmail(identifier) ? String(identifier).trim().toLowerCase() : normalizeIndianMobile(identifier) || String(identifier).trim().toLowerCase();
 
 // Used when an account doesn't exist, so a wrong guess costs the same time as a real check
-const DUMMY_HASH = require("bcryptjs").hashSync("bonito-timing-equaliser", 12);
+const DUMMY_HASH = require("../utils/bcrypt").hashSync("bonito-timing-equaliser", 12);
 const SIGN_IN_FAILED = "Invalid credentials. After several failed attempts, sign-in is paused for 15 minutes.";
 
 /** Finds a user by email or verified mobile number. */
@@ -83,7 +83,7 @@ const login = asyncHandler(async (req, res) => {
   );
 
   if (!user) {
-    await require("bcryptjs").compare(String(authKey || password || ""), DUMMY_HASH);
+    await require("../utils/bcrypt").compare(String(authKey || password || ""), DUMMY_HASH);
     throw new ApiError(401, SIGN_IN_FAILED);
   }
 

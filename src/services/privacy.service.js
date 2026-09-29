@@ -123,16 +123,31 @@ const listDeletionRequests = async ({ status }) => {
     .populate("user", "name email phone status createdAt deletedAt")
     .populate("handledBy", "name")
     .lean();
-  // Flag open matters that the reviewer should know about before deleting
-  return Promise.all(
-    rows.map(async (r) => {
-      if (r.status !== "pending" || !r.user) return r;
-      const [openReports, activeProjects] = await Promise.all([
-        Report.countDocuments({ $or: [{ reporter: r.user._id }, { reportedUser: r.user._id }], status: { $in: ["submitted", "under_review"] } }),
-        Conversation.countDocuments({ "project.customers": r.user._id, "project.status": { $in: ["active", "on_hold"] } })
-      ]);
-      return { ...r, openReports, activeProjects };
-    })
+  // Flag open matters that the reviewer should know about before deleting.
+  // Two grouped queries for the whole page (was two counts per request).
+  const ids = rows.filter((r) => r.status === "pending" && r.user).map((r) => r.user._id);
+  if (!ids.length) return rows;
+  const [reportCounts, projectCounts] = await Promise.all([
+    Report.aggregate([
+      { $match: { status: { $in: ["submitted", "under_review"] }, $or: [{ reporter: { $in: ids } }, { reportedUser: { $in: ids } }] } },
+      // A report counts once for each listed person it involves
+      { $project: { people: { $setIntersection: [["$reporter", "$reportedUser"], ids] } } },
+      { $unwind: "$people" },
+      { $group: { _id: "$people", n: { $sum: 1 } } }
+    ]),
+    Conversation.aggregate([
+      { $match: { "project.customers": { $in: ids }, "project.status": { $in: ["active", "on_hold"] } } },
+      { $unwind: "$project.customers" },
+      { $match: { "project.customers": { $in: ids } } },
+      { $group: { _id: "$project.customers", n: { $sum: 1 } } }
+    ])
+  ]);
+  const reportsBy = new Map(reportCounts.map((c) => [String(c._id), c.n]));
+  const projectsBy = new Map(projectCounts.map((c) => [String(c._id), c.n]));
+  return rows.map((r) =>
+    r.status !== "pending" || !r.user
+      ? r
+      : { ...r, openReports: reportsBy.get(String(r.user._id)) || 0, activeProjects: projectsBy.get(String(r.user._id)) || 0 }
   );
 };
 

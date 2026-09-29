@@ -7,6 +7,7 @@ const cloudinary = require("../config/cloudinary");
 const { validateSafeUrl } = require("../utils/ssrfGuard");
 const { getIO } = require("../sockets");
 const ApiError = require("../utils/ApiError");
+const logger = require("../utils/logger");
 const ApiResponse = require("../utils/ApiResponse");
 const asyncHandler = require("../utils/asyncHandler");
 const mongoose = require("mongoose");
@@ -86,6 +87,7 @@ const uploadFile = asyncHandler(async (req, res) => {
           const stream = cloudinary.uploader.upload_stream(
             {
               folder: `task_manager/${entityType}s`,
+              timeout: 60000,
               resource_type: fileType === "image" ? "image" : "raw",
               // Private: only reachable through the short-lived links the API hands to people on the task
               type: "private",
@@ -103,14 +105,10 @@ const uploadFile = asyncHandler(async (req, res) => {
       secureUrl = result.secure_url;
       publicId = result.public_id;
     } catch (cloudErr) {
-      console.warn(`[Cloudinary Warning] Upload failed (${cloudErr.message}), falling back to direct data.`);
-      if (fileType === "image") {
-        const base64 = req.file.buffer.toString("base64");
-        secureUrl = `data:${detected.mime};base64,${base64}`;
-      } else {
-        secureUrl = `https://storage.placeholder.com/mock-upload-${Date.now()}.${ext}`;
-      }
-      publicId = `local_${Date.now()}`;
+      // Never fall back to storing the file inline in MongoDB (a 20 MB image becomes a
+      // ~27 MB base64 string, breaks the 16 MB document limit and bloats every list).
+      logger.warn(`Cloudinary upload failed: ${cloudErr.message}`);
+      throw new ApiError(503, "File storage is unavailable right now. Please try again in a minute.");
     }
   } else {
     // Local / Dev Fallback Mock URL
@@ -377,6 +375,7 @@ const uploadAvatar = asyncHandler(async (req, res) => {
           const stream = cloudinary.uploader.upload_stream(
             {
               folder: "task_manager/avatars",
+              timeout: 60000,
               transformation: [{ width: 300, height: 300, crop: "fill", gravity: "face" }],
               public_id: `avatar_${req.user._id}_${Date.now()}`
             },

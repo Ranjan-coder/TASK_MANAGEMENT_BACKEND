@@ -32,5 +32,6 @@ const moderationIncidentSchema = new mongoose.Schema(
 
 moderationIncidentSchema.index({ status: 1, createdAt: -1 });
 moderationIncidentSchema.index({ conversation: 1, createdAt: -1 });
+moderationIncidentSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model("ModerationIncident", moderationIncidentSchema);

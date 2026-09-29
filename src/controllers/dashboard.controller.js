@@ -140,8 +140,8 @@ const getTeamPerformance = asyncHandler(async (req, res) => {
  * Super Admin only: paginated audit log
  */
 const getAuditLogs = asyncHandler(async (req, res) => {
-  const page = parseInt(req.query.page, 10) || 1;
-  const limit = parseInt(req.query.limit, 10) || 50;
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100); // capped: limit=100000 was accepted
   const skip = (page - 1) * limit;
 
   const filter = {};
@@ -154,7 +154,8 @@ const getAuditLogs = asyncHandler(async (req, res) => {
       .populate("actor", "name email avatarUrl role")
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(limit),
+      .limit(limit)
+      .lean(),
     AuditLog.countDocuments(filter)
   ]);
 

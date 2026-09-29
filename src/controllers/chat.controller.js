@@ -8,6 +8,7 @@ const { ROLES, ADMIN_ROLES } = require("../config/roles");
 const groupKeys = require("../services/groupKeys.service");
 const { stampFranking } = require("../utils/franking");
 const mongoose = require("mongoose");
+const logger = require("../utils/logger");
 
 const isObjectId = (v) => typeof v === "string" && mongoose.isValidObjectId(v) && /^[a-f0-9]{24}$/i.test(v);
 // One emoji (with skin tone / ZWJ sequences / flags), nothing else
@@ -499,16 +500,23 @@ const sendMessage = asyncHandler(async (req, res) => {
   }
 
   // Project chats: start or stop the reply timer; count abuse flags (never fail the send)
-  await require("../services/sla.service").onMessage({ conversation: req.conversation, sender: req.user });
-  await require("../services/offlineAlerts.service").onStaffMessage({ conversation: req.conversation, sender: req.user });
+  // The three hooks are independent: run them together (latency = slowest, not the sum).
+  const hooks = [
+    require("../services/sla.service").onMessage({ conversation: req.conversation, sender: req.user }),
+    require("../services/offlineAlerts.service").onStaffMessage({ conversation: req.conversation, sender: req.user })
+  ];
   if (messageType === "text" && req.conversation.project) {
-    await moderationService.afterTextMessage({
-      conversation: req.conversation,
-      sender: req.user,
-      newHits: message.moderation?.hitCount || 0,
-      severity: message.moderation?.severity
-    });
+    hooks.push(
+      moderationService.afterTextMessage({
+        conversation: req.conversation,
+        sender: req.user,
+        newHits: message.moderation?.hitCount || 0,
+        severity: message.moderation?.severity
+      })
+    );
   }
+  const settled = await Promise.allSettled(hooks);
+  for (const s of settled) if (s.status === "rejected") logger.error(`sendMessage hook failed: ${s.reason?.message}`);
 
   res.status(201).json(new ApiResponse(201, message, "Message sent"));
 });

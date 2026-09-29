@@ -180,18 +180,22 @@ const invoiceLink = async ({ conversationId, milestoneId, viewer }) => {
 // ── Admin ────────────────────────────────────────────────────────────────────
 
 const adminList = async ({ filter }) => {
-  const finances = await ProjectFinance.find().lean();
-  const convs = await Conversation.find({ _id: { $in: finances.map((f) => f.conversation) } })
-    .select("name project.status project.customers project.leadDesigner")
-    .populate("project.customers", "name phone")
-    .populate("project.leadDesigner", "name")
-    .lean();
+  const finances = await ProjectFinance.find().select("conversation contractValuePaise milestones updatedAt").lean();
+  const convIds = finances.map((f) => f.conversation);
+  // Independent lookups: run them together
+  const [convs, withoutSchedule] = await Promise.all([
+    Conversation.find({ _id: { $in: convIds } })
+      .select("name project.status project.customers project.leadDesigner")
+      .populate("project.customers", "name phone")
+      .populate("project.leadDesigner", "name")
+      .lean(),
+    Conversation.find({ project: { $exists: true }, "project.status": { $ne: "completed" }, _id: { $nin: convIds } })
+      .select("name project.customers")
+      .populate("project.customers", "name")
+      .limit(100)
+      .lean()
+  ]);
   const byConv = new Map(convs.map((c) => [String(c._id), c]));
-  const withoutSchedule = await Conversation.find({ project: { $exists: true }, "project.status": { $ne: "completed" }, _id: { $nin: finances.map((f) => f.conversation) } })
-    .select("name project.customers")
-    .populate("project.customers", "name")
-    .limit(100)
-    .lean();
   let rows = finances
     .filter((f) => byConv.has(String(f.conversation)))
     .map((f) => {
@@ -342,10 +346,33 @@ const runReminders = async (now = new Date()) => {
   if (+now - lastReminderRun < 60 * 60 * 1000) return 0;
   lastReminderRun = +now;
   const soon = new Date(+now + REMIND_BEFORE_DAYS * DAY);
-  const finances = await ProjectFinance.find({ milestones: { $elemMatch: { status: "upcoming", dueDate: { $ne: null, $lte: soon } } } }).limit(500);
+  let sent = 0;
+  // Walk every matching schedule in _id order, 200 at a time. (A single .limit(500)
+  // re-read the same 500 every hour once there were more, and the rest were never reminded.)
+  let lastId = null;
+  for (;;) {
+    const finances = await ProjectFinance.find({
+      ...(lastId ? { _id: { $gt: lastId } } : {}),
+      milestones: { $elemMatch: { status: "upcoming", dueDate: { $ne: null, $lte: soon } } }
+    })
+      .sort({ _id: 1 })
+      .limit(200)
+      .select("conversation milestones")
+      .lean();
+    if (!finances.length) break;
+    lastId = finances[finances.length - 1]._id;
+    // One query for all their projects instead of one per schedule
+    const convs = await Conversation.find({ _id: { $in: finances.map((x) => x.conversation) } }).select("name project").lean();
+    const convById = new Map(convs.map((c) => [String(c._id), c]));
+    sent += await remindBatch(finances, convById, now);
+  }
+  return sent;
+};
+
+const remindBatch = async (finances, convById, now) => {
   let sent = 0;
   for (const f of finances) {
-    const conv = await Conversation.findById(f.conversation).select("name project");
+    const conv = convById.get(String(f.conversation));
     if (!conv?.project || conv.project.status === "completed") continue;
     for (const m of f.milestones) {
       if (m.status !== "upcoming" || !m.dueDate) continue;

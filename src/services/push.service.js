@@ -82,7 +82,7 @@ const sendToUser = async (userId, payload) => {
         return;
       }
       try {
-        await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, body, { TTL: 6 * 3600, urgency: "normal" });
+        await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, body, { TTL: 6 * 3600, urgency: "normal", timeout: 10000 });
         delivered += 1;
         await PushSubscription.updateOne({ _id: sub._id }, { lastSuccessAt: new Date() });
       } catch (err) {

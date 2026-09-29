@@ -212,6 +212,8 @@ const respond = async ({ reportId, user, text }) => {
 const PERSON = "name email phone role avatarUrl designation status";
 
 const listForAdmin = async ({ status, direction, page = 1, limit = 30, viewer }) => {
+  limit = Math.min(Math.max(Number(limit) || 30, 1), 100);
+  page = Math.max(Number(page) || 1, 1);
   // Reports that involve the viewing admin are left out of their queue
   const q = viewer ? { reporter: { $ne: viewer._id }, reportedUser: { $ne: viewer._id } } : {};
   if (status) q.status = status;
@@ -224,12 +226,13 @@ const listForAdmin = async ({ status, direction, page = 1, limit = 30, viewer })
       .select("-evidenceMessages.text -notes")
       .populate("reporter", PERSON)
       .populate("reportedUser", PERSON)
-      .populate("conversation", "name project.status"),
+      .populate("conversation", "name project.status")
+      .lean(),
     Report.countDocuments(q),
     Report.aggregate([{ $group: { _id: "$status", n: { $sum: 1 } } }])
   ]);
   return {
-    items: items.map((r) => ({ ...r.toObject(), reasonLabel: REASON_LABELS[r.reason], evidenceCount: r.evidenceMessages.length, attachmentCount: r.attachments.length })),
+    items: items.map((r) => ({ ...r, reasonLabel: REASON_LABELS[r.reason], evidenceCount: (r.evidenceMessages || []).length, attachmentCount: (r.attachments || []).length })),
     total,
     page,
     counts: Object.fromEntries(counts.map((c) => [c._id, c.n]))

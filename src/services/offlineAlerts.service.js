@@ -3,6 +3,7 @@ const Conversation = require("../models/Conversation");
 const User = require("../models/User");
 const config = require("../config/env");
 const logger = require("../utils/logger");
+const { mapLimit } = require("../utils/mapLimit");
 const { ROLES } = require("../config/roles");
 const push = require("./push.service");
 const { sendAlert, alertChannels } = require("./sms");
@@ -133,13 +134,13 @@ const advance = async (alert, now) => {
 
 const processDue = async ({ now = new Date(), filter = {}, limit = 200 } = {}) => {
   const due = await OfflineAlert.find({ ...filter, status: "pending", dueAt: { $lte: now } }).sort({ dueAt: 1 }).limit(limit);
-  for (const alert of due) {
+  await mapLimit(due, 10, async (alert) => {
     try {
       await advance(alert, now);
     } catch (err) {
       logger.error(`Offline alert ${alert._id} failed: ${err.message}`);
     }
-  }
+  });
   return due.length;
 };
 

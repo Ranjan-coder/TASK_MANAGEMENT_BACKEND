@@ -28,7 +28,7 @@ const initSockets = (httpServer) => {
       origin: config.clientUrl,
       credentials: true
     },
-    pingTimeout: 60000
+    pingTimeout: 20000 // detect dead clients (and show them offline) in ~45 s instead of ~85 s
   });
 
   // Socket Authentication Handshake
@@ -82,18 +82,16 @@ const initSockets = (httpServer) => {
   });
 
   io.on("connection", async (socket) => {
-    logger.info(`Socket connected: ${socket.id} (User: ${socket.user.name})`);
+    logger.debug(`Socket connected: ${socket.id} (User: ${socket.user.name})`);
 
     // Automatically join user's private notification room
     socket.join(`user:${socket.user._id}`);
 
-    // Set user online in Redis + broadcast presence
-    await setOnline(socket.user._id.toString(), io);
 
     // Join task room with access verification
     socket.on("join:task", async ({ taskId }) => {
       try {
-        const task = await Task.findById(taskId);
+        const task = await Task.findById(taskId).select("assignedBy assignedTo watchers").lean();
         if (!task) return;
 
         const userId = socket.user._id.toString();
@@ -120,8 +118,12 @@ const initSockets = (httpServer) => {
     // Register all chat-related socket events
     registerChatEvents(socket, io);
 
+    // Presence after handlers are registered (awaiting it first dropped early
+    // join:conversation events) and without blocking the connection.
+    setOnline(socket.user._id.toString(), io).catch((err) => logger.warn(`setOnline failed: ${err.message}`));
+
     socket.on("disconnect", () => {
-      logger.info(`Socket disconnected: ${socket.id}`);
+      logger.debug(`Socket disconnected: ${socket.id}`);
     });
   });
 

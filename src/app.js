@@ -5,6 +5,7 @@ const cookieParser = require("cookie-parser");
 const mongoSanitize = require("express-mongo-sanitize");
 const hpp = require("hpp");
 const morgan = require("morgan");
+const compression = require("compression");
 
 const config = require("./config/env");
 const { apiLimiter } = require("./middlewares/rateLimiter.middleware");
@@ -61,9 +62,14 @@ app.use(
   })
 );
 
+// Gzip JSON responses over 1 KB (conversation and message lists shrink 5–10×).
+// Safe against BREACH-style attacks here: auth tokens live only in cookies, never in bodies.
+app.use(compression({ threshold: 1024 }));
+
 // Logging
 if (config.env !== "test") {
-  app.use(morgan("dev"));
+  // Coloured dev output is for local use; production gets a compact access log.
+  app.use(morgan(config.env === "production" ? "combined" : "dev"));
 }
 
 // Request Parsers

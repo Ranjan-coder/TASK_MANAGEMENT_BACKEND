@@ -158,6 +158,8 @@ conversationSchema.index({ type: 1, "members.user": 1 });
 conversationSchema.index({ lastActivityAt: -1 });
 conversationSchema.index({ "project.status": 1, lastActivityAt: -1 }, { sparse: true });
 conversationSchema.index({ isArchived: 1, "members.user": 1 });
+// Customer Home, payments, monitoring and privacy all look projects up by customer
+conversationSchema.index({ "project.customers": 1, lastActivityAt: -1 }, { sparse: true });
 
 const Conversation = mongoose.model("Conversation", conversationSchema);
 module.exports = Conversation;

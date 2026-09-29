@@ -1,5 +1,5 @@
 const mongoose = require("mongoose");
-const bcrypt = require("bcryptjs");
+const bcrypt = require("../utils/bcrypt");
 const { ALL_ROLES, ROLES } = require("../config/roles");
 
 // One signed-in device. Each session owns exactly one refresh token (stored as

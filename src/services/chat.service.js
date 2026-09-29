@@ -3,6 +3,7 @@ const Message = require("../models/Message");
 const User = require("../models/User");
 const ApiError = require("../utils/ApiError");
 const redisClient = require("../config/redis");
+const mongoose = require("mongoose");
 
 // ── Conversation helpers ────────────────────────────────────────────────────
 
@@ -87,39 +88,36 @@ const getUserConversations = async (userId) => {
     .populate("members.user", "name avatarUrl status publicKey keyVersion")
     .lean();
 
-  // Compute unread count per conversation
-  const withUnread = await Promise.all(
-    conversations.map(async (conv) => {
-      const member = conv.members.find((m) => m.user._id.toString() === userId.toString());
-      const lastRead = member?.lastRead || new Date(0);
+  if (!conversations.length) return [];
+  const me = userId.toString();
 
-      const unreadCount = await Message.countDocuments({
-        conversation: conv._id,
-        createdAt: { $gt: lastRead },
-        sender: { $ne: userId },
-        isDeleted: false
-      });
+  // Unread counts for every conversation in ONE aggregation (was one countDocuments
+  // per conversation). Each $or branch is served by the {conversation, createdAt} index.
+  const branches = conversations.map((conv) => {
+    const member = conv.members.find((m) => m.user && m.user._id.toString() === me);
+    return { conversation: conv._id, createdAt: { $gt: member?.lastRead || new Date(0) } };
+  });
+  const counts = await Message.aggregate([
+    { $match: { $or: branches, sender: { $ne: new mongoose.Types.ObjectId(me) }, isDeleted: false } },
+    { $group: { _id: "$conversation", n: { $sum: 1 } } }
+  ]);
+  const unreadBy = new Map(counts.map((c) => [c._id.toString(), c.n]));
 
-      // Attach online presence from Redis
-      const memberIds = conv.members.map((m) => m.user._id.toString());
-      const onlineStatuses = await Promise.all(
-        memberIds.map(async (uid) => {
-          if (!redisClient || redisClient.status !== "ready") return false;
-          const val = await redisClient.get(`presence:${uid}`);
-          return !!val;
-        })
-      );
+  // Presence for every distinct member in ONE Redis round trip (was one GET per member per chat).
+  const online = new Set();
+  if (redisClient && redisClient.status === "ready") {
+    const ids = [...new Set(conversations.flatMap((c) => c.members.filter((m) => m.user).map((m) => m.user._id.toString())))];
+    try {
+      const vals = await redisClient.mget(ids.map((id) => `presence:${id}`));
+      vals.forEach((v, i) => { if (v) online.add(ids[i]); });
+    } catch { /* presence is best-effort */ }
+  }
 
-      conv.members = conv.members.map((m, i) => ({
-        ...m,
-        isOnline: onlineStatuses[i] || false
-      }));
-
-      return { ...conv, unreadCount };
-    })
-  );
-
-  return withUnread;
+  return conversations.map((conv) => ({
+    ...conv,
+    members: conv.members.map((m) => ({ ...m, isOnline: !!m.user && online.has(m.user._id.toString()) })),
+    unreadCount: unreadBy.get(conv._id.toString()) || 0
+  }));
 };
 
 // ── Message helpers ──────────────────────────────────────────────────────────

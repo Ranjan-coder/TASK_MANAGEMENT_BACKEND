@@ -24,5 +24,8 @@ leadSchema.index(
   { unique: true, partialFilterExpression: { status: { $in: ["new", "contacted"] } } }
 );
 leadSchema.index({ status: 1, createdAt: -1 });
+// The partial unique index above can't serve plain customer / campaign lookups
+leadSchema.index({ customer: 1, createdAt: -1 });
+leadSchema.index({ campaign: 1, createdAt: -1 });
 
 module.exports = mongoose.model("Lead", leadSchema);

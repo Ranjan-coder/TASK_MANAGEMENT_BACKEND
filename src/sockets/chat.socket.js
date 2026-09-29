@@ -10,11 +10,20 @@ const typingTimers = new Map();
  * Set user online in Redis with 70s TTL (heartbeat refreshes every 60s from client)
  */
 /** Rooms of everyone who shares a chat with this user (presence isn't broadcast to the whole app). */
+// Short-lived cache: a reconnect storm (deploy, flaky network) would otherwise run
+// this 500-conversation query on every connect AND disconnect.
+const PARTNER_TTL_MS = 60 * 1000;
+const partnerCache = new Map(); // userId → { at, rooms }
 const partnerRooms = async (userId) => {
+  const hit = partnerCache.get(String(userId));
+  if (hit && Date.now() - hit.at < PARTNER_TTL_MS) return hit.rooms;
   const convs = await Conversation.find({ "members.user": userId, isArchived: false }).select("members.user").limit(500).lean();
   const ids = new Set();
   for (const c of convs) for (const m of c.members) if (String(m.user) !== String(userId)) ids.add(`user:${m.user}`);
-  return [...ids];
+  const rooms = [...ids];
+  if (partnerCache.size > 5000) partnerCache.clear();
+  partnerCache.set(String(userId), { at: Date.now(), rooms });
+  return rooms;
 };
 
 const emitPresence = async (io, userId, isOnline) => {
@@ -56,10 +65,7 @@ const registerChatEvents = (socket, io) => {
   socket.on("join:conversation", async ({ conversationId }) => {
     try {
       // Verify membership before allowing room join
-      const conv = await Conversation.findOne({
-        _id: conversationId,
-        "members.user": userId
-      });
+      const conv = await Conversation.exists({ _id: conversationId, "members.user": userId });
       if (!conv) {
         return socket.emit("chat:error", { code: "NOT_MEMBER", message: "Access denied to conversation" });
       }
@@ -149,6 +155,11 @@ const registerChatEvents = (socket, io) => {
         typingTimers.delete(key);
       }
     }
+    // Another tab or device may still be connected; only then go offline.
+    try {
+      const remaining = await io.in(`user:${userId}`).fetchSockets();
+      if (remaining.length) return;
+    } catch { /* fall through */ }
     await setOffline(userId, io);
   });
 };

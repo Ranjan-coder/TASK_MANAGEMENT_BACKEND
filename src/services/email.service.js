@@ -7,7 +7,14 @@ const transporter = nodemailer.createTransport({
   auth: {
     user: process.env.SMTP_USER || "",
     pass: process.env.SMTP_PASS || ""
-  }
+  },
+  // Reuse connections and give up quickly: nodemailer's defaults (2 min connect,
+  // 10 min socket) could hold a request open for minutes when SMTP is slow.
+  pool: true,
+  maxConnections: 3,
+  connectionTimeout: 10000,
+  greetingTimeout: 10000,
+  socketTimeout: 20000
 });
 
 const sendEmail = async ({ to, subject, html }) => {

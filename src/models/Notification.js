@@ -74,6 +74,7 @@ const notificationSchema = new mongoose.Schema(
 );
 
 notificationSchema.index({ recipient: 1, isRead: 1, createdAt: -1 });
+notificationSchema.index({ recipient: 1, createdAt: -1 }); // the main list (all, newest first)
 
 const Notification = mongoose.model("Notification", notificationSchema);
 module.exports = Notification;

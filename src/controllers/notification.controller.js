@@ -3,8 +3,8 @@ const ApiResponse = require("../utils/ApiResponse");
 const asyncHandler = require("../utils/asyncHandler");
 
 const getMyNotifications = asyncHandler(async (req, res) => {
-  const page = parseInt(req.query.page, 10) || 1;
-  const limit = parseInt(req.query.limit, 10) || 30;
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100); // capped: limit=100000 was accepted
   const skip = (page - 1) * limit;
 
   const [notifications, total, unreadCount] = await Promise.all([
@@ -13,7 +13,8 @@ const getMyNotifications = asyncHandler(async (req, res) => {
       .populate("relatedTask", "title status priority")
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(limit),
+      .limit(limit)
+      .lean(),
     Notification.countDocuments({ recipient: req.user._id }),
     Notification.countDocuments({ recipient: req.user._id, isRead: false })
   ]);

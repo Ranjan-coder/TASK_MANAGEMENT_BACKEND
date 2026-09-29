@@ -4,6 +4,7 @@ const Message = require("../models/Message");
 const User = require("../models/User");
 const ApiError = require("../utils/ApiError");
 const logger = require("../utils/logger");
+const { mapLimit } = require("../utils/mapLimit");
 const redisClient = require("../config/redis");
 const { ROLES } = require("../config/roles");
 const hoursUtil = require("../utils/businessHours");
@@ -327,13 +328,13 @@ const emailEscalation = async (contacts, p) => {
  */
 const processDue = async ({ now = new Date(), filter = {}, limit = 200 } = {}) => {
   const due = await ChatSla.find({ ...filter, open: true, nextCheckAt: { $lte: now } }).sort({ nextCheckAt: 1 }).limit(limit);
-  for (const period of due) {
+  await mapLimit(due, 10, async (period) => {
     try {
       await advance(period, now);
     } catch (err) {
       logger.error(`SLA step failed for ${period._id}: ${err.message}`);
     }
-  }
+  });
   return due.length;
 };
 

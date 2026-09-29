@@ -69,6 +69,7 @@ reportSchema.index({ status: 1, createdAt: -1 });
 reportSchema.index({ reportedUser: 1, createdAt: -1 });
 reportSchema.index({ reporter: 1, createdAt: -1 });
 reportSchema.index({ conversation: 1 });
+reportSchema.index({ direction: 1, createdAt: -1 });
 
 const Report = mongoose.model("Report", reportSchema);
 module.exports = Report;

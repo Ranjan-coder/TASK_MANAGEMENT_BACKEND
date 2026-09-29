@@ -26,7 +26,7 @@ const cloudinaryReady = () => Boolean(cloudinary.config().cloud_name && cloudina
 
 const uploadBuffer = (buffer, options) =>
   new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(options, (err, result) => (err ? reject(err) : resolve(result)));
+    const stream = cloudinary.uploader.upload_stream({ timeout: 60000, ...options }, (err, result) => (err ? reject(err) : resolve(result)));
     stream.end(buffer);
   });
 
