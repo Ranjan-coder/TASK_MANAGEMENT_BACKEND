@@ -1,5 +1,6 @@
 const config = require("../config/env");
 const { ROLES, PRIVILEGED_ROLES } = require("../config/roles");
+const { permissionRules } = require("../config/permissions");
 
 /**
  * Deny-by-default access policy, evaluated by authMiddleware on every
@@ -113,6 +114,14 @@ const CONTENT_MANAGE_RULES = [
   rule("POST", "/admin/media")
 ];
 
+// Departments, designations, org chart and "my team" (read only; staff)
+const ORG_VIEW_RULES = [
+  rule("GET", "/org/departments"),
+  rule("GET", "/org/designations"),
+  rule("GET", "/org/chart"),
+  rule("GET", "/org/team")
+];
+
 const ROLE_ALLOW_LISTS = Object.freeze({
   [ROLES.CUSTOMER]: [
     ...AUTH_RULES,
@@ -134,7 +143,19 @@ const ROLE_ALLOW_LISTS = Object.freeze({
     ...MODERATION_CLIENT_RULES,
     ...PERSONAL_RULES,
     ...CONTENT_VIEW_RULES,
-    ...CONTENT_MANAGE_RULES
+    ...CONTENT_MANAGE_RULES,
+    ...ORG_VIEW_RULES
+  ],
+  // Read-only oversight. Its dashboards, payments, projects and leads screens come
+  // from the permissions the role implies (config/permissions.js ROLE_IMPLIED).
+  [ROLES.LEADERSHIP]: [
+    ...AUTH_RULES,
+    ...NOTIFICATION_RULES,
+    ...PROFILE_RULES,
+    ...STAFF_CHAT_RULES,
+    ...MODERATION_CLIENT_RULES,
+    ...PERSONAL_RULES,
+    ...ORG_VIEW_RULES
   ]
 });
 
@@ -175,9 +196,11 @@ const evaluateAccess = ({ user, method, originalUrl }) => {
     return deny("PASSWORD_CHANGE_REQUIRED", "You must change your password before continuing.");
   }
 
-  // Gate 2: privileged accounts must have 2FA enabled
+  // Gate 2: privileged accounts must have 2FA enabled — including anyone holding an
+  // add-on permission (e.g. confirming payments), whatever their role
+  const extraRules = permissionRules(user);
   if (
-    PRIVILEGED_ROLES.includes(user.role) &&
+    (PRIVILEGED_ROLES.includes(user.role) || extraRules.length > 0) &&
     !user.isTwoFactorEnabled &&
     isPrivileged2FAEnforced() &&
     !matches([...AUTH_RULES, ...PROFILE_RULES], httpMethod, path)
@@ -187,7 +210,7 @@ const evaluateAccess = ({ user, method, originalUrl }) => {
 
   // Gate 3: role allow-lists (deny by default)
   const allowList = ROLE_ALLOW_LISTS[user.role];
-  if (allowList && !matches(allowList, httpMethod, path)) {
+  if (allowList && !matches(allowList, httpMethod, path) && !matches(extraRules, httpMethod, path)) {
     return deny("ROLE_SCOPE_DENIED", "Forbidden: this area is not available for your account type.");
   }
 

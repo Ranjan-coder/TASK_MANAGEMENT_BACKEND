@@ -74,10 +74,12 @@ quickReplyRoutes.delete(
 
 // ── /admin/leads and /admin/testimonials — content managers ──────────────────
 const adminLeadRoutes = express.Router();
-adminLeadRoutes.use(authMiddleware, rbacMiddleware(...CONTENT_MANAGERS));
-adminLeadRoutes.get("/", validate(v.leadListSchema), asyncHandler(async (req, res) => ok(res, await leads.listLeads(req.query))));
+// Content managers, or add-ons: "leads.view" reads, "leads.manage" also updates
+adminLeadRoutes.use(authMiddleware);
+adminLeadRoutes.get("/", require("../middlewares/authorize.middleware")(CONTENT_MANAGERS, "leads.view", "leads.manage"), validate(v.leadListSchema), asyncHandler(async (req, res) => ok(res, await leads.listLeads(req.query))));
 adminLeadRoutes.patch(
   "/:id",
+  require("../middlewares/authorize.middleware")(CONTENT_MANAGERS, "leads.manage"),
   validate(v.leadUpdateSchema),
   asyncHandler(async (req, res) => {
     const lead = await leads.updateLead(req.params.id, req.user, req.body);

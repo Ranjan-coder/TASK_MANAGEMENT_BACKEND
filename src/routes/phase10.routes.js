@@ -64,15 +64,22 @@ referralRoutes.get("/mine", asyncHandler(async (req, res) => ok(res, await refer
 
 // ── Admin: payment schedules ─────────────────────────────────────────────────
 const adminPaymentRoutes = express.Router();
-adminPaymentRoutes.use(authMiddleware, rbacMiddleware("superadmin", "admin"));
+// Admins do everything. Add-ons: "payments.view" reads; "payments.confirm" also
+// confirms or rejects a customer's "I've paid" (no schedule edits, waivers or invoices).
+adminPaymentRoutes.use(authMiddleware);
+const payAdmin = rbacMiddleware("superadmin", "admin");
+const payView = require("../middlewares/authorize.middleware")(["superadmin", "admin"], "payments.view", "payments.confirm");
+const payConfirm = require("../middlewares/authorize.middleware")(["superadmin", "admin"], "payments.confirm");
 adminPaymentRoutes.get(
   "/",
+  payView,
   validate(z.object({ query: z.object({ filter: z.enum(["all", "verifying", "overdue"]).optional() }).strict() })),
   asyncHandler(async (req, res) => ok(res, await payments.adminList(req.query)))
 );
-adminPaymentRoutes.get("/:projectId", validate(z.object({ params: z.object({ projectId: id }) })), asyncHandler(async (req, res) => ok(res, await payments.adminGet(req.params.projectId))));
+adminPaymentRoutes.get("/:projectId", payView, validate(z.object({ params: z.object({ projectId: id }) })), asyncHandler(async (req, res) => ok(res, await payments.adminGet(req.params.projectId))));
 adminPaymentRoutes.put(
   "/:projectId",
+  payAdmin,
   validate(
     z.object({
       params: z.object({ projectId: id }),
@@ -96,15 +103,23 @@ adminPaymentRoutes.put(
 );
 adminPaymentRoutes.post(
   "/:projectId/milestones/:milestoneId/confirm",
+  payConfirm,
   validate(z.object({ params: msParams, body: z.object(paymentFields).strict() })),
   asyncHandler(async (req, res) => {
-    const out = await payments.confirmPayment({ conversationId: req.params.projectId, milestoneId: req.params.milestoneId, admin: req.user, ...req.body });
+    const out = await payments.confirmPayment({
+      conversationId: req.params.projectId,
+      milestoneId: req.params.milestoneId,
+      admin: req.user,
+      ...req.body,
+      claimedOnly: !["superadmin", "admin"].includes(req.user.role)
+    });
     await recordAuditLog({ req, action: "payment_confirmed", targetType: "System", targetId: req.params.projectId, metadata: { milestone: req.params.milestoneId, amountPaise: req.body.amountPaise, method: req.body.method, receiptNo: out.receiptNo } });
     ok(res, out, `Payment confirmed — receipt ${out.receiptNo}`);
   })
 );
 adminPaymentRoutes.post(
   "/:projectId/milestones/:milestoneId/reject",
+  payConfirm,
   validate(z.object({ params: msParams, body: z.object({ note: text(300).pipe(z.string().min(10, "Tell the customer what's wrong")) }).strict() })),
   asyncHandler(async (req, res) => {
     const out = await payments.rejectClaim({ conversationId: req.params.projectId, milestoneId: req.params.milestoneId, note: req.body.note });
@@ -114,6 +129,7 @@ adminPaymentRoutes.post(
 );
 adminPaymentRoutes.post(
   "/:projectId/milestones/:milestoneId/waive",
+  payAdmin,
   validate(z.object({ params: msParams })),
   asyncHandler(async (req, res) => {
     const out = await payments.waiveMilestone({ conversationId: req.params.projectId, milestoneId: req.params.milestoneId });
@@ -124,6 +140,7 @@ adminPaymentRoutes.post(
 const pdfUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PDF_BYTES, files: 1, fields: 2 } });
 adminPaymentRoutes.post(
   "/:projectId/milestones/:milestoneId/invoice",
+  payAdmin,
   validate(z.object({ params: msParams })),
   pdfUpload.single("file"),
   asyncHandler(async (req, res) => {

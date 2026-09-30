@@ -3,6 +3,10 @@ const { ALL_ROLES } = require("../config/roles");
 const { authKeySchema, saltSchema } = require("../utils/kdf");
 
 const roleEnum = z.enum(ALL_ROLES, { required_error: "Role is required" });
+// Department / designation / manager come from the managed lists (org.service.js);
+// null clears them. Free-text names are no longer accepted.
+const refId = z.string().regex(/^[a-f0-9]{24}$/i, "Invalid id").nullable();
+const orgFields = { departmentId: refId.optional(), designationId: refId.optional(), reportsTo: refId.optional() };
 
 const createUserSchema = z.object({
   body: z
@@ -14,41 +18,40 @@ const createUserSchema = z.object({
       authKey: authKeySchema,
       kdfSalt: saltSchema,
       role: roleEnum.optional(),
-      department: z.string().trim().max(100).optional(),
-      designation: z.string().trim().max(100).optional()
+      ...orgFields
     })
     .strict()
 });
 
-const updateUserSchema = z.object({
-  body: z
+const profileFields = {
+  name: z.string().trim().min(2).max(100).optional(),
+  // Only empty, https URLs, or raster data:image URLs (the upload fallback when
+  // Cloudinary is off). Blocks javascript: URLs and SVG, which can carry script.
+  avatarUrl: z
+    .union([
+      z.literal(""),
+      z.string().max(2048).url().refine((u) => u.startsWith("https://"), "Avatar URL must use https"),
+      z.string().max(1_400_000).regex(/^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/, "Invalid image data")
+    ])
+    .optional()
+    .nullable(),
+  // Customers: "your designer replied" alerts outside the app
+  notificationPrefs: z.object({ whatsapp: z.boolean(), sms: z.boolean() }).strict().optional(),
+  // Staff leave (reply reminders go to the backup designer while away)
+  availability: z
     .object({
-      name: z.string().trim().min(2).max(100).optional(),
-      department: z.string().trim().max(100).optional(),
-      designation: z.string().trim().max(100).optional(),
-      // Only empty, https URLs, or raster data:image URLs (the upload fallback when
-      // Cloudinary is off). Blocks javascript: URLs and SVG, which can carry script.
-      avatarUrl: z
-        .union([
-          z.literal(""),
-          z.string().max(2048).url().refine((u) => u.startsWith("https://"), "Avatar URL must use https"),
-          z.string().max(1_400_000).regex(/^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/, "Invalid image data")
-        ])
-        .optional()
-        .nullable(),
-      // Customers: "your designer replied" alerts outside the app
-      notificationPrefs: z.object({ whatsapp: z.boolean(), sms: z.boolean() }).strict().optional(),
-      // Staff leave (reply reminders go to the backup designer while away)
-      availability: z
-        .object({
-          status: z.enum(["available", "on_leave"]),
-          until: z.coerce.date().nullable().optional()
-        })
-        .strict()
-        .optional()
+      status: z.enum(["available", "on_leave"]),
+      until: z.coerce.date().nullable().optional()
     })
     .strict()
-});
+    .optional()
+};
+
+// Your own profile. Department / designation / manager are accepted here only from a
+// superadmin (nobody can manage their own account elsewhere); everyone else gets a 403.
+const updateProfileSchema = z.object({ body: z.object({ ...profileFields, ...orgFields }).strict() });
+// An admin editing someone
+const updateUserSchema = z.object({ body: z.object({ ...profileFields, ...orgFields }).strict() });
 
 const updateRoleSchema = z.object({
   body: z.object({ role: roleEnum }).strict()
@@ -67,6 +70,7 @@ const updateStatusSchema = z.object({
 module.exports = {
   createUserSchema,
   updateUserSchema,
+  updateProfileSchema,
   updateRoleSchema,
   updateStatusSchema
 };

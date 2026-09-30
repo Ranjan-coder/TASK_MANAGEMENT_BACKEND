@@ -42,7 +42,8 @@ const MOUNTS = {
   "/api/v1/admin/referrals": require("../src/routes/phase10.routes").adminReferralRoutes,
   "/api/v1/payments": require("../src/routes/phase10.routes").paymentRoutes,
   "/api/v1/referrals": require("../src/routes/phase10.routes").referralRoutes,
-  "/api/v1/customer/auth": require("../src/routes/customerAuth.routes")
+  "/api/v1/customer/auth": require("../src/routes/customerAuth.routes"),
+  "/api/v1/org": require("../src/routes/org.routes")
 };
 
 const SAMPLE_ID = "64b7f0c2a1b2c3d4e5f60718";
@@ -145,4 +146,85 @@ test("customers reach only the approval answer, timeline and testimonials among 
     "GET /api/v1/testimonials/",
     "POST /api/v1/chat/approvals/:id/decision"
   ]);
+});
+
+
+// ── Leadership role and add-on permissions (org structure, Phase C) ───────────
+
+const { permissionRules } = require("../src/config/permissions");
+const allowedFor = (user) => routes.filter((r) => evaluateAccess({ user, method: r.method, originalUrl: r.url }).allowed);
+const key = (r) => `${r.method} ${r.path}`;
+
+test("customers can't reach any org route", () => {
+  expect(allowedForCustomer.filter((r) => r.path.startsWith("/api/v1/org"))).toEqual([]);
+});
+
+test("leadership reaches only read-only oversight routes (never a change outside its own account and chat)", () => {
+  const leadership = { role: "leadership", isTwoFactorEnabled: true, mustChangePassword: false, permissions: [] };
+  const reach = allowedFor(leadership);
+  const writes = reach.filter(
+    (r) =>
+      r.method !== "GET" &&
+      !/^\/api\/v1\/(auth|notifications|chat|moderation|push|privacy)(\/|$)/.test(r.path) &&
+      !["/api/v1/users/profile", "/api/v1/uploads/avatar"].includes(r.path)
+  );
+  expect(writes.map(key)).toEqual([]);
+  const admin = reach.filter((r) => r.path.startsWith("/api/v1/admin")).map(key).sort();
+  expect(admin).toEqual(
+    [
+      "GET /api/v1/admin/leads/",
+      "GET /api/v1/admin/monitoring/designers",
+      "GET /api/v1/admin/monitoring/overview",
+      "GET /api/v1/admin/payments/",
+      "GET /api/v1/admin/payments/:projectId",
+      "GET /api/v1/admin/projects/",
+      "GET /api/v1/admin/projects/:id",
+      "GET /api/v1/admin/sla/metrics"
+    ].sort()
+  );
+  // Never customer personal records, settings, users, tasks or audit logs
+  for (const p of ["/api/v1/admin/monitoring/customers", "/api/v1/admin/settings", "/api/v1/users/", "/api/v1/tasks/", "/api/v1/dashboard/audit-logs"]) {
+    expect(reach.filter((r) => r.path.startsWith(p) && r.path !== "/api/v1/users/profile").map(key)).toEqual([]);
+  }
+});
+
+test("an add-on permission opens exactly its routes for an allow-listed role", () => {
+  const plain = { role: "marketing", isTwoFactorEnabled: true, mustChangePassword: false, permissions: [] };
+  const finance = { ...plain, permissions: ["payments.confirm"] };
+  const gained = allowedFor(finance).filter((r) => !allowedFor(plain).some((x) => key(x) === key(r))).map(key).sort();
+  expect(gained).toEqual(
+    [
+      "GET /api/v1/admin/payments/",
+      "GET /api/v1/admin/payments/:projectId",
+      "POST /api/v1/admin/payments/:projectId/milestones/:milestoneId/confirm",
+      "POST /api/v1/admin/payments/:projectId/milestones/:milestoneId/reject"
+    ].sort()
+  );
+});
+
+test("add-on permissions never apply to customers", () => {
+  const sneaky = { ...customer, permissions: ["payments.confirm", "leads.manage"] };
+  expect(allowedFor(sneaky).map(key).sort()).toEqual(allowedForCustomer.map(key).sort());
+});
+
+test("holding an add-on permission requires 2FA when it's enforced", () => {
+  const prev = process.env.ENFORCE_PRIVILEGED_2FA;
+  process.env.ENFORCE_PRIVILEGED_2FA = "true";
+  try {
+    const designer = { role: "user", isTwoFactorEnabled: false, mustChangePassword: false, permissions: [] };
+    expect(evaluateAccess({ user: designer, method: "GET", originalUrl: "/api/v1/tasks" }).allowed).toBe(true);
+    const granted = { ...designer, permissions: ["leads.view"] };
+    expect(evaluateAccess({ user: granted, method: "GET", originalUrl: "/api/v1/tasks" }).code).toBe("TWO_FACTOR_REQUIRED");
+    const leadership = { role: "leadership", isTwoFactorEnabled: false, mustChangePassword: false };
+    expect(evaluateAccess({ user: leadership, method: "GET", originalUrl: "/api/v1/admin/monitoring/overview" }).code).toBe("TWO_FACTOR_REQUIRED");
+  } finally {
+    process.env.ENFORCE_PRIVILEGED_2FA = prev;
+  }
+});
+
+test("every leadership and permission rule matches a real route (no stale rules)", () => {
+  const all = { role: "user", permissions: require("../src/config/permissions").PERMISSION_KEYS };
+  const rules = [...ROLE_ALLOW_LISTS.leadership, ...permissionRules(all)];
+  const stale = rules.filter((rule) => !routes.some((r) => (rule.method === "*" || rule.method === r.method) && rule.regex.test(normalisePath(r.url))));
+  expect(stale.map((r) => `${r.method} ${r.regex}`)).toEqual([]);
 });

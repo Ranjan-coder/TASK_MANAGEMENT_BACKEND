@@ -9,8 +9,10 @@ const {
   createUserSchema,
   updateUserSchema,
   updateRoleSchema,
-  updateStatusSchema
+  updateStatusSchema,
+  updateProfileSchema
 } = require("../validators/user.validator");
+const { permissionsSchema } = require("../validators/org.validator");
 
 router.use(authMiddleware);
 
@@ -26,7 +28,7 @@ router.post(
 );
 
 // Update logged-in user profile (name, department, designation, avatarUrl)
-router.patch("/profile", validate(updateUserSchema), userController.updateProfile);
+router.patch("/profile", validate(updateProfileSchema), userController.updateProfile);
 
 // Get a specific user (self or admin/superadmin)
 router.get("/:id", userController.getUserById);
@@ -45,6 +47,14 @@ router.patch(
   rbacMiddleware("superadmin"),
   validate(updateRoleSchema),
   userController.updateUserRole
+);
+
+// Add-on permissions (superadmin only)
+router.patch(
+  "/:id/permissions",
+  rbacMiddleware("superadmin"),
+  validate(permissionsSchema),
+  userController.updateUserPermissions
 );
 
 // Change status (admin/superadmin)

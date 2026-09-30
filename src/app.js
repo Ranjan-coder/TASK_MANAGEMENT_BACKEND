@@ -120,6 +120,7 @@ app.use("/api/v1/reports", reportRoutes);
 app.use("/api/v1/ratings", ratingRoutes);
 app.use("/api/v1/admin", adminContentRoutes);
 app.use("/api/v1/customer/auth", customerAuthRoutes);
+app.use("/api/v1/org", require("./routes/org.routes"));
 app.use("/api/v1/users", userRoutes);
 app.use("/api/v1/tasks", taskRoutes);
 app.use("/api/v1", commentRoutes);

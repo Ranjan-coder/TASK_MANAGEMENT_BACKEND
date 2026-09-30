@@ -4,6 +4,12 @@ const ApiResponse = require("../utils/ApiResponse");
 const asyncHandler = require("../utils/asyncHandler");
 const { recordAuditLog } = require("../services/audit.service");
 const { ROLES, ALL_ROLES, ADMIN_ROLES, ADMIN_MANAGEABLE_ROLES } = require("../config/roles");
+const { GRANTABLE_ROLES } = require("../config/permissions");
+const org = require("../services/org.service");
+
+const isId = (v) => typeof v === "string" && /^[a-f0-9]{24}$/i.test(v);
+const ORG_AUDIT_FIELDS = ["department", "designation", "reportsTo"];
+const pick = (obj, keys) => Object.fromEntries(keys.map((k) => [k, obj?.[k] ? String(obj[k]) : null]));
 
 // Escape user input before using it inside a RegExp (prevents regex injection / ReDoS)
 const escapeRegex = (value) => String(value).slice(0, 100).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -33,6 +39,9 @@ const getAllUsers = asyncHandler(async (req, res) => {
   if (typeof req.query.role === "string" && ALL_ROLES.includes(req.query.role)) query.role = req.query.role;
   if (typeof req.query.status === "string") query.status = req.query.status;
   if (typeof req.query.department === "string") query.department = req.query.department;
+  if (isId(req.query.departmentId)) query.departmentId = req.query.departmentId;
+  if (isId(req.query.designationId)) query.designationId = req.query.designationId;
+  if (isId(req.query.reportsTo)) query.reportsTo = req.query.reportsTo;
   if (typeof req.query.search === "string" && req.query.search.trim()) {
     const safe = escapeRegex(req.query.search.trim());
     query.$or = [
@@ -62,7 +71,7 @@ const getUserById = asyncHandler(async (req, res) => {
     throw new ApiError(403, "You do not have permission to view this user");
   }
 
-  const user = await User.findById(req.params.id).select("-refreshTokens");
+  const user = await User.findById(req.params.id).select("-refreshTokens").populate("reportsTo", "name avatarUrl designation");
   if (!user) {
     throw new ApiError(404, "User not found");
   }
@@ -70,7 +79,7 @@ const getUserById = asyncHandler(async (req, res) => {
 });
 
 const updateUser = asyncHandler(async (req, res) => {
-  const { name, department, designation, avatarUrl, availability } = req.body;
+  const { name, avatarUrl, availability, departmentId, designationId, reportsTo } = req.body;
 
   const target = await User.findById(req.params.id);
   if (!target) {
@@ -78,10 +87,10 @@ const updateUser = asyncHandler(async (req, res) => {
   }
   assertCanManage(req.user, target);
 
-  const updateData = {};
+  // Department / designation / manager: list membership, seniority and cycle checks
+  const orgPatch = await org.resolveAssignment({ actor: req.user, target, targetRole: target.role, departmentId, designationId, reportsTo });
+  const updateData = { ...orgPatch };
   if (name !== undefined) updateData.name = name;
-  if (department !== undefined) updateData.department = department;
-  if (designation !== undefined) updateData.designation = designation;
   if (avatarUrl !== undefined) updateData.avatarUrl = avatarUrl;
   if (availability !== undefined && target.role !== ROLES.CUSTOMER) {
     updateData.availability = {
@@ -101,7 +110,10 @@ const updateUser = asyncHandler(async (req, res) => {
     action: "user_updated",
     targetType: "User",
     targetId: user._id,
-    metadata: { updatedFields: { name, department, designation } }
+    metadata: {
+      updatedFields: Object.keys(updateData),
+      ...(Object.keys(orgPatch).length && { before: pick(target, ORG_AUDIT_FIELDS), after: pick(user, ORG_AUDIT_FIELDS) })
+    }
   });
 
   res.status(200).json(new ApiResponse(200, user, "User updated successfully"));
@@ -119,9 +131,14 @@ const updateUserRole = asyncHandler(async (req, res) => {
   }
   assertCanManage(req.user, target);
 
+  // Customers hold no department/designation/manager; add-ons only on grantable roles
+  const clear = {
+    ...(role === ROLES.CUSTOMER && { departmentId: null, department: "", designationId: null, designation: "", reportsTo: null }),
+    ...(!GRANTABLE_ROLES.includes(role) && { permissions: [] })
+  };
   const user = await User.findByIdAndUpdate(
     req.params.id,
-    { $set: { role, currentSessions: [], refreshTokens: [] }, $inc: { tokenVersion: 1 } }, // role change signs them out everywhere
+    { $set: { role, ...clear, currentSessions: [], refreshTokens: [] }, $inc: { tokenVersion: 1 } }, // role change signs them out everywhere
     { new: true }
   ).select("-refreshTokens");
   await require("../sockets").disconnectSessions(req.params.id);
@@ -135,7 +152,7 @@ const updateUserRole = asyncHandler(async (req, res) => {
     action: "user_role_changed",
     targetType: "User",
     targetId: user._id,
-    metadata: { newRole: role }
+    metadata: { oldRole: target.role, newRole: role }
   });
 
   res.status(200).json(new ApiResponse(200, user, `User role changed to ${role}`));
@@ -178,12 +195,14 @@ const updateUserStatus = asyncHandler(async (req, res) => {
 });
 
 const createUser = asyncHandler(async (req, res) => {
-  const { name, email, authKey, kdfSalt, role, department, designation } = req.body;
+  const { name, email, authKey, kdfSalt, role, departmentId, designationId, reportsTo } = req.body;
+  const finalRole = role || ROLES.USER;
 
-  // Admins can create user/marketing/customer accounts; only Super Admins can create admins
-  if (req.user.role === ROLES.ADMIN && role && !ADMIN_MANAGEABLE_ROLES.includes(role)) {
+  // Admins can create user/marketing/customer accounts; only Super Admins can create admins or leadership
+  if (req.user.role === ROLES.ADMIN && !ADMIN_MANAGEABLE_ROLES.includes(finalRole)) {
     throw new ApiError(403, "Admins can only create user, marketing or customer accounts");
   }
+  const orgPatch = await org.resolveAssignment({ actor: req.user, target: null, targetRole: finalRole, departmentId, designationId, reportsTo });
 
   const existingUser = await User.findOne({ email });
   if (existingUser) {
@@ -193,9 +212,8 @@ const createUser = asyncHandler(async (req, res) => {
   const user = new User({
     name,
     email,
-    role: role || ROLES.USER,
-    department,
-    designation,
+    role: finalRole,
+    ...orgPatch,
     createdBy: req.user._id,
     // The admin knows the initial password, so the user must replace it before
     // their chat keys are created (the admin could otherwise derive the wrapKey)
@@ -209,7 +227,7 @@ const createUser = asyncHandler(async (req, res) => {
     action: "user_created",
     targetType: "User",
     targetId: user._id,
-    metadata: { email, role: user.role }
+    metadata: { email, role: user.role, department: user.department || null, designation: user.designation || null }
   });
 
   const userResponse = user.toObject();
@@ -246,9 +264,35 @@ const deleteUser = asyncHandler(async (req, res) => {
   res.status(200).json(new ApiResponse(200, null, "User permanently deleted"));
 });
 
+/** PATCH /users/:id/permissions — superadmin grants add-on permissions (config/permissions.js). */
+const updateUserPermissions = asyncHandler(async (req, res) => {
+  const target = await User.findById(req.params.id);
+  if (!target) throw new ApiError(404, "User not found");
+  if (!GRANTABLE_ROLES.includes(target.role)) {
+    throw new ApiError(400, "Add-on permissions are for user, marketing and leadership accounts (admins already have them)");
+  }
+  const before = [...(target.permissions || [])];
+  const user = await User.findByIdAndUpdate(req.params.id, { $set: { permissions: req.body.permissions } }, { new: true }).select("-refreshTokens");
+  await recordAuditLog({
+    req,
+    action: "user_permissions_changed",
+    targetType: "User",
+    targetId: user._id,
+    metadata: { before, after: req.body.permissions }
+  });
+  // Takes effect on their next request (the account is re-read on every request)
+  res.status(200).json(new ApiResponse(200, user, "Permissions updated"));
+});
+
 const updateProfile = asyncHandler(async (req, res) => {
-  const { name, department, designation, avatarUrl, availability, notificationPrefs } = req.body;
+  const { name, avatarUrl, availability, notificationPrefs, departmentId, designationId, reportsTo } = req.body;
   const updateData = {};
+  if (departmentId !== undefined || designationId !== undefined || reportsTo !== undefined) {
+    if (req.user.role !== ROLES.SUPERADMIN) {
+      throw new ApiError(403, "Your department, designation and manager are set by an admin", [{ code: "ORG_SELF_ASSIGN" }]);
+    }
+    Object.assign(updateData, await org.resolveAssignment({ actor: req.user, target: req.user, targetRole: req.user.role, departmentId, designationId, reportsTo }));
+  }
   if (notificationPrefs !== undefined && req.user.role === ROLES.CUSTOMER) {
     if ((notificationPrefs.whatsapp || notificationPrefs.sms) && !req.user.phoneVerified) {
       throw new ApiError(400, "Verify your mobile number first");
@@ -257,12 +301,8 @@ const updateProfile = asyncHandler(async (req, res) => {
   }
   if (name !== undefined) updateData.name = name;
   if (avatarUrl !== undefined) updateData.avatarUrl = avatarUrl;
-  // Customers cannot set department/designation — otherwise a customer could
-  // label themselves "Bonito Manager" and impersonate staff in chat.
-  if (req.user.role !== ROLES.CUSTOMER) {
-    if (department !== undefined) updateData.department = department;
-    if (designation !== undefined) updateData.designation = designation;
-  }
+  // Department and designation are assigned by an admin (managed lists, seniority
+  // rules): nobody can give themselves a title such as "CEO" from their profile.
   if (availability !== undefined && req.user.role !== ROLES.CUSTOMER) {
     updateData.availability = {
       status: availability.status,
@@ -293,6 +333,7 @@ const updateProfile = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  updateUserPermissions,
   getAllUsers,
   getUserById,
   createUser,

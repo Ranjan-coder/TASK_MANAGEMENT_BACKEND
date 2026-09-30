@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const bcrypt = require("../utils/bcrypt");
 const { ALL_ROLES, ROLES } = require("../config/roles");
+const { PERMISSION_KEYS, effectivePermissions } = require("../config/permissions");
 
 // One signed-in device. Each session owns exactly one refresh token (stored as
 // a hash), so removing the session signs that device out immediately.
@@ -47,14 +48,23 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: ""
     },
+    // Department / designation come from the managed lists (Department, Designation).
+    // The name strings are copies kept for fast display, search and filters; the ids
+    // are the source of truth, and a rename rewrites the copies (org.service.js).
     department: {
       type: String,
-      default: "General"
+      default: ""
     },
     designation: {
       type: String,
-      default: "Staff"
+      default: ""
     },
+    departmentId: { type: mongoose.Schema.Types.ObjectId, ref: "Department", default: null },
+    designationId: { type: mongoose.Schema.Types.ObjectId, ref: "Designation", default: null },
+    // Line manager (org chart, "my team"); cycles are refused when it's set
+    reportsTo: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    // Add-on permissions granted by a superadmin (config/permissions.js)
+    permissions: { type: [{ type: String, enum: PERMISSION_KEYS }], default: [] },
     status: {
       type: String,
       enum: ["active", "inactive", "suspended"],
@@ -234,6 +244,9 @@ const userSchema = new mongoose.Schema(
 
 userSchema.index({ role: 1 });
 userSchema.index({ status: 1 });
+userSchema.index({ departmentId: 1 });
+userSchema.index({ designationId: 1 });
+userSchema.index({ reportsTo: 1 });
 userSchema.index({ referralCode: 1 }, { unique: true, partialFilterExpression: { referralCode: { $type: "string" } } });
 userSchema.index(
   { phone: 1 },
@@ -311,6 +324,8 @@ const PRIVATE_FIELDS = [
 userSchema.set("toJSON", {
   transform: (doc, ret) => {
     for (const f of PRIVATE_FIELDS) delete ret[f];
+    // What this person may do beyond their role (drives the app's menus; the API re-checks)
+    if (ret.role) ret.effectivePermissions = effectivePermissions(ret);
     // Sign-in sessions: only what the Devices screen needs, never token hashes
     if (Array.isArray(ret.currentSessions)) {
       ret.currentSessions = ret.currentSessions.map((s) => ({ sessionId: s.sessionId, deviceName: s.deviceName, lastActive: s.lastActive, createdAt: s.createdAt, trusted: s.trusted }));

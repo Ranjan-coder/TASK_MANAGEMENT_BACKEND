@@ -7,6 +7,9 @@ const asyncHandler = require("../utils/asyncHandler");
 const ApiResponse = require("../utils/ApiResponse");
 const monitoring = require("../services/monitoring.service");
 const { recordAuditLog } = require("../services/audit.service");
+const authorize = require("../middlewares/authorize.middleware");
+const ADMIN = ["superadmin", "admin"];
+
 
 const id = z.string().regex(/^[a-f0-9]{24}$/i, "Invalid id");
 const daysQuery = z.object({ query: z.object({ days: z.coerce.number().int().refine((d) => [7, 30, 90].includes(d), "Use 7, 30 or 90").optional().default(30) }).strict() });
@@ -23,21 +26,28 @@ const customersQuery = z.object({
 
 // Admin monitoring (read-only). Suspending uses the existing PATCH /users/:id/status.
 const router = express.Router();
-router.use(authMiddleware, rbacMiddleware("superadmin", "admin"));
+// Overview and designer performance: admins, or anyone with "performance.view"
+// (e.g. leadership). Customer records (personal data): admins only.
+router.use(authMiddleware);
+const perf = authorize(ADMIN, "performance.view");
+const adminOnly = rbacMiddleware(...ADMIN);
 
-router.get("/overview", asyncHandler(async (req, res) => res.status(200).json(new ApiResponse(200, await monitoring.getOverview()))));
+router.get("/overview", perf, asyncHandler(async (req, res) => res.status(200).json(new ApiResponse(200, await monitoring.getOverview()))));
 router.get(
   "/designers",
+  perf,
   validate(daysQuery),
   asyncHandler(async (req, res) => res.status(200).json(new ApiResponse(200, await monitoring.getDesignerPerformance({ days: req.query.days }))))
 );
 router.get(
   "/customers",
+  adminOnly,
   validate(customersQuery),
   asyncHandler(async (req, res) => res.status(200).json(new ApiResponse(200, await monitoring.listCustomers(req.query))))
 );
 router.get(
   "/customers/:id",
+  adminOnly,
   validate(z.object({ params: z.object({ id }) })),
   asyncHandler(async (req, res) => {
     const customer = await monitoring.getCustomer(req.params.id);

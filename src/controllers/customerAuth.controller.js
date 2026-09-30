@@ -63,8 +63,6 @@ const register = asyncHandler(async (req, res) => {
       email,
       pendingPhone: phone,
       role: ROLES.CUSTOMER,
-      department: "Customers",
-      designation: "Customer",
       createdBy: null,
       consent: { termsAcceptedAt: new Date(), privacyVersion: config.privacyPolicyVersion },
       notificationPrefs: { whatsapp: Boolean(req.body.projectAlerts), sms: false, updatedAt: new Date() }

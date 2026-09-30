@@ -273,13 +273,19 @@ const saveSchedule = async ({ conversationId, admin, contractValuePaise, gstRate
 };
 
 /** Admin confirms a payment (from a customer's claim or recorded directly). Issues the receipt. */
-const confirmPayment = async ({ conversationId, milestoneId, admin, method, reference, amountPaise, paidOn }) => {
+/**
+ * `claimedOnly`: people confirming through the "payments.confirm" add-on (not admins)
+ * may only confirm a payment the customer has told us about, not record one directly.
+ */
+const confirmPayment = async ({ conversationId, milestoneId, admin, method, reference, amountPaise, paidOn, claimedOnly = false }) => {
   const conv = await loadProject(conversationId);
   const { m } = await findMilestone(conversationId, milestoneId);
-  if (!["upcoming", "verifying"].includes(m.status)) throw new ApiError(409, "This payment is already closed");
+  const open = claimedOnly ? ["verifying"] : ["upcoming", "verifying"];
+  if (claimedOnly && m.status === "upcoming") throw new ApiError(403, "Only an admin can record a payment the customer hasn't reported", [{ code: "CLAIM_REQUIRED" }]);
+  if (!open.includes(m.status)) throw new ApiError(409, "This payment is already closed");
   // Claim the milestone first, so a lost race never uses up a receipt number (no gaps in the series)
   const updated = await ProjectFinance.findOneAndUpdate(
-    { conversation: conversationId, milestones: { $elemMatch: { _id: milestoneId, status: { $in: ["upcoming", "verifying"] } } } },
+    { conversation: conversationId, milestones: { $elemMatch: { _id: milestoneId, status: { $in: open } } } },
     {
       $inc: { __v: 1 },
       $set: {

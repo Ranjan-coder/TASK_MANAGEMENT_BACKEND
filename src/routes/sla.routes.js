@@ -13,8 +13,8 @@ slaRoutes.post("/:id/snooze", validate(v.slaIdSchema), controller.snooze);
 
 // Admin: response metrics and reply-timer settings
 const adminSlaRoutes = express.Router();
-adminSlaRoutes.use(authMiddleware, rbacMiddleware("superadmin", "admin"));
-adminSlaRoutes.get("/metrics", validate(v.metricsSchema), controller.getMetrics);
+adminSlaRoutes.use(authMiddleware);
+adminSlaRoutes.get("/metrics", require("../middlewares/authorize.middleware")(["superadmin", "admin"], "performance.view"), validate(v.metricsSchema), controller.getMetrics);
 
 const settingsRoutes = express.Router();
 settingsRoutes.use(authMiddleware, rbacMiddleware("superadmin", "admin"));

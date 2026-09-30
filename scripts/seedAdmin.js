@@ -47,12 +47,14 @@ const main = async () => {
   let changed = true;
 
   if (!user) {
+    // Department from the managed list (seeded on first use)
+    const lists = await require("../src/services/org.service").load();
+    const mgmt = lists.deptByKey.get(require("../src/utils/orgKey").orgKey("Management"));
     user = new User({
       name,
       email,
       role: ROLES.SUPERADMIN,
-      department: "Management",
-      designation: "Administrator",
+      ...(mgmt && { departmentId: mgmt._id, department: mgmt.name }),
       isEmailVerified: true,
       mustChangePassword: true
     });
