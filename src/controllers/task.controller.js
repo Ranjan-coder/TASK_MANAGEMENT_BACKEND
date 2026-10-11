@@ -101,6 +101,10 @@ const updateTask = asyncHandler(async (req, res) => {
     "watchers"
   ];
 
+  const { assertStaff } = require("../services/directory.service");
+  await assertStaff(req.body.assignedTo, "assigned tasks");
+  await assertStaff(req.body.watchers, "watchers");
+
   allowedUpdates.forEach((field) => {
     if (req.body[field] !== undefined) {
       task[field] = req.body[field];
@@ -153,6 +157,7 @@ const reassignTask = asyncHandler(async (req, res) => {
   if (!assignedTo || !Array.isArray(assignedTo) || assignedTo.length === 0) {
     throw new ApiError(400, "assignedTo must be a non-empty array of user IDs");
   }
+  await require("../services/directory.service").assertStaff(assignedTo, "assigned tasks");
 
   const previousAssignees = task.assignedTo.map((u) => u.toString());
   task.assignedTo = assignedTo;

@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /**
  * One impression/click per customer, per campaign, per day. The unique index
@@ -18,4 +19,5 @@ const campaignEventSchema = new mongoose.Schema(
 campaignEventSchema.index({ campaign: 1, user: 1, type: 1, day: 1 }, { unique: true });
 campaignEventSchema.index({ createdAt: 1 }, { expireAfterSeconds: 180 * 24 * 60 * 60 });
 
+campaignEventSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("CampaignEvent", campaignEventSchema);

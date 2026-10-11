@@ -107,3 +107,28 @@ describe("privileged 2FA enforcement", () => {
 test("a missing role is always denied", () => {
   expect(can({ role: undefined }, "GET", "/api/v1/tasks")).toBe(false);
 });
+
+describe("changing a password is never blocked by the gates (key backup read)", () => {
+  const { evaluateAccess } = require("../src/middlewares/accessPolicy");
+  const bundle = (user, method = "GET") => evaluateAccess({ user, method, originalUrl: "/api/v1/chat/keys/bundle" });
+
+  test("during a forced password change, the encrypted key backup can be read (only read)", () => {
+    const staff = { role: "user", mustChangePassword: true, isTwoFactorEnabled: false, permissions: [] };
+    expect(bundle(staff).allowed).toBe(true);
+    expect(bundle(staff, "PUT").code).toBe("PASSWORD_CHANGE_REQUIRED");
+    expect(evaluateAccess({ user: staff, method: "GET", originalUrl: "/api/v1/tasks" }).code).toBe("PASSWORD_CHANGE_REQUIRED");
+  });
+
+  test("the product owner (and a privileged account still setting up 2FA) can read it too", () => {
+    const prev = process.env.ENFORCE_PRIVILEGED_2FA;
+    process.env.ENFORCE_PRIVILEGED_2FA = "true";
+    try {
+      const owner = { role: "platform_owner", mustChangePassword: true, isTwoFactorEnabled: false, permissions: [] };
+      expect(bundle(owner).allowed).toBe(true);
+      expect(bundle({ ...owner, mustChangePassword: false }).allowed).toBe(true);
+      expect(evaluateAccess({ user: { ...owner, mustChangePassword: false }, method: "GET", originalUrl: "/api/v1/chat/conversations" }).allowed).toBe(false);
+    } finally {
+      process.env.ENFORCE_PRIVILEGED_2FA = prev;
+    }
+  });
+});

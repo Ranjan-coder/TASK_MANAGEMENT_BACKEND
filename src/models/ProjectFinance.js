@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /**
  * Payment schedule for one project (R9). Amounts are whole paise (integers)
@@ -58,4 +59,5 @@ const projectFinanceSchema = new mongoose.Schema(
 
 projectFinanceSchema.index({ "milestones.status": 1, "milestones.dueDate": 1 });
 
+projectFinanceSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("ProjectFinance", projectFinanceSchema);

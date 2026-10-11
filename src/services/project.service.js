@@ -3,6 +3,7 @@ const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
 const User = require("../models/User");
 const ApiError = require("../utils/ApiError");
+const { currentOrgName } = require("./organisation.service");
 const logger = require("../utils/logger");
 const { ROLES } = require("../config/roles");
 const { buildInitialKeyring, dropMemberKeys } = require("./groupKeys.service");
@@ -53,7 +54,7 @@ const resolveTeam = async ({ customerIds, leadDesignerId, backupDesignerId, mana
   }
   for (const id of staff) {
     const u = byId.get(id);
-    if (!u || !PROJECT_STAFF_ROLES.includes(u.role)) throw new ApiError(400, "Designers and managers must be Bonito staff accounts");
+    if (!u || !PROJECT_STAFF_ROLES.includes(u.role)) throw new ApiError(400, "Designers and managers must be staff accounts in your organisation");
     if (u.status !== "active") throw new ApiError(400, `${u.name}'s account is not active`);
   }
 
@@ -126,13 +127,13 @@ const createProject = async ({ actor, name, customerIds, leadDesignerId, backupD
     }
   });
 
-  await postSystemMessage(conversation._id, actor._id, `Bonito created this project chat for ${name.trim()}.`);
+  await postSystemMessage(conversation._id, actor._id, `${await currentOrgName("Your team")} created this project chat for ${name.trim()}.`);
   const populated = await populateProject(Conversation.findById(conversation._id));
 
   emit((io) => memberIds.forEach((uid) => io.to(`user:${uid}`).emit("conversation:created", populated)));
   notifyUsers(team.customers, {
     title: "Your project chat is ready",
-    message: `Chat with your Bonito design team about "${name.trim()}" in Chat.`
+    message: `Chat with your design team about "${name.trim()}" in Chat.`
   });
   notifyUsers(team.staff, {
     title: "You've been added to a project",
@@ -210,7 +211,7 @@ const updateProject = async (id, { actor, name, status, customerIds, leadDesigne
   });
   const addedCustomers = added.filter((u) => team.customers.includes(u));
   if (addedCustomers.length) {
-    notifyUsers(addedCustomers, { title: "Your project chat is ready", message: `Chat with your Bonito design team about "${conversation.name}".` });
+    notifyUsers(addedCustomers, { title: "Your project chat is ready", message: `Chat with your design team about "${conversation.name}".` });
   }
   const addedStaff = added.filter((u) => !team.customers.includes(u));
   if (addedStaff.length) {

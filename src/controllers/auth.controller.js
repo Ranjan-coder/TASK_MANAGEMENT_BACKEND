@@ -10,9 +10,12 @@ const twoFactorService = require("../services/twoFactor.service");
 const { recordAuditLog } = require("../services/audit.service");
 const { ROLES } = require("../config/roles");
 const { normalizeIndianMobile, looksLikeEmail } = require("../utils/phone");
-const { startPhoneVerification, sanitizeUser } = require("../services/customerAuth.service");
+const { startPhoneVerification, signedInUser } = require("../services/customerAuth.service");
 const { kdfParams, fakeSalt, newSalt } = require("../utils/kdf");
 const { disconnectSessions } = require("../sockets");
+const tenant = require("../utils/tenantContext");
+const { findSingleAccount, findAccounts, findUserById, enterUserOrg, runAsAccount, isPlatformUser } = require("../services/accountLookup.service");
+const { getOrgStatus, getManyPublic, orgHasModule } = require("../services/organisation.service");
 
 /** One canonical form per identifier (so "9876543210" and "+91 98765 43210" behave the same). */
 const canonicalIdentifier = (identifier) =>
@@ -20,13 +23,29 @@ const canonicalIdentifier = (identifier) =>
 
 // Used when an account doesn't exist, so a wrong guess costs the same time as a real check
 const DUMMY_HASH = require("../utils/bcrypt").hashSync("bonito-timing-equaliser", 12);
-const SIGN_IN_FAILED = "Invalid credentials. After several failed attempts, sign-in is paused for 15 minutes.";
+// One message for every failure (unknown code, unknown account, wrong password), so it
+// reveals nothing about which organisations someone belongs to (M5, D-R1)
+const SIGN_IN_FAILED =
+  "Check your organisation code, email or mobile number, and password. After several failed attempts, sign-in is paused for 15 minutes.";
+const ORG_PAUSED = "Your organisation's access is paused. Contact your administrator.";
 
-/** Finds a user by email or verified mobile number. */
-const findByIdentifier = async (identifier, select) => {
-  if (looksLikeEmail(identifier)) return User.findOne({ email: identifier.toLowerCase() }).select(select);
+const assertOrgActive = async (user) => {
+  if (isPlatformUser(user)) return; // the product owner has no organisation
+  if ((await getOrgStatus(user.orgId)) !== "active") throw new ApiError(403, ORG_PAUSED, [{ code: "ORG_SUSPENDED" }]);
+  // Customers only exist in the customer portal (module-access-plan.md, Phase 3)
+  if (user.role === ROLES.CUSTOMER && !(await orgHasModule(user.orgId, "customer_portal"))) {
+    throw new ApiError(403, "The customer portal isn't available for your organisation.", [{ code: "MODULE_DISABLED", module: "customer_portal" }]);
+  }
+};
+
+/**
+ * Finds the one account an email or verified mobile number (and optional
+ * organisation code) refers to. Null if there is none, or if it is ambiguous.
+ */
+const findByIdentifier = async (identifier, select, organisation) => {
+  if (looksLikeEmail(identifier)) return findSingleAccount({ email: identifier }, { organisation, select });
   const phone = normalizeIndianMobile(identifier);
-  return phone ? User.findOne({ phone }).select(select) : null;
+  return phone ? findSingleAccount({ phone }, { organisation, select }) : null;
 };
 
 /**
@@ -37,16 +56,17 @@ const findByIdentifier = async (identifier, select) => {
  * send the raw password once, to migrate an account created before this scheme.
  */
 const prelogin = asyncHandler(async (req, res) => {
-  const { identifier } = req.body;
-  const user = await findByIdentifier(identifier, "kdf authScheme");
+  const { identifier, organisation } = req.body;
+  const user = await findByIdentifier(identifier, "kdf authScheme", organisation);
 
   if (!user) {
-    return res.status(200).json(new ApiResponse(200, { kdf: kdfParams(fakeSalt(canonicalIdentifier(identifier))), legacy: false }));
+    return res.status(200).json(new ApiResponse(200, { kdf: kdfParams(fakeSalt(`${canonicalIdentifier(identifier)}|${organisation || ""}`)), legacy: false }));
   }
 
   if (!user.kdf?.salt) {
     // First contact since the scheme was introduced: assign a salt now so the
     // client can derive the new authKey during this login.
+    enterUserOrg(user);
     user.kdf = kdfParams(newSalt());
     await user.save({ validateBeforeSave: false });
   }
@@ -74,12 +94,13 @@ const getOwnKdf = asyncHandler(async (req, res) => {
  * a phone-verification step instead of a session.
  */
 const login = asyncHandler(async (req, res) => {
-  const { identifier, authKey, password, trustDevice } = req.body;
+  const { identifier, authKey, password, trustDevice, organisation } = req.body;
   const trusted = trustDevice !== false;
 
   const user = await findByIdentifier(
     identifier,
-    "+password +twoFactorSecret +failedLoginAttempts +lockUntil +refreshTokens +pendingPhone"
+    "+password +twoFactorSecret +failedLoginAttempts +lockUntil +refreshTokens +pendingPhone",
+    organisation
   );
 
   if (!user) {
@@ -109,7 +130,10 @@ const login = asyncHandler(async (req, res) => {
   if (user.status === "suspended" || user.status === "inactive") {
     throw new ApiError(403, `Your account is ${user.status}. Contact administrator.`);
   }
+  await assertOrgActive(user);
 
+  // From here on everything is scoped to this account's organisation
+  enterUserOrg(user);
   await user.resetLoginAttempts();
 
   // One-time migration: replace bcrypt(password) with bcrypt(authKey)
@@ -148,7 +172,7 @@ const login = asyncHandler(async (req, res) => {
     targetId: user._id
   });
 
-  res.status(200).json(new ApiResponse(200, { user: sanitizeUser(user) }, "Login successful"));
+  res.status(200).json(new ApiResponse(200, { user: await signedInUser(user) }, "Login successful"));
 });
 
 const verify2FA = asyncHandler(async (req, res) => {
@@ -156,16 +180,18 @@ const verify2FA = asyncHandler(async (req, res) => {
 
   const decoded = authService.verifyStepToken(tempToken, "2fa_pending");
 
-  const user = await User.findById(decoded.userId).select("+twoFactorSecret +refreshTokens +failedLoginAttempts +lockUntil +twoFactorLastCode");
+  const user = await findUserById(decoded.userId, "+twoFactorSecret +refreshTokens +failedLoginAttempts +lockUntil +twoFactorLastCode");
   if (!user || !user.twoFactorSecret) {
     throw new ApiError(400, "2FA is not configured for this account");
   }
+  await assertOrgActive(user);
+  enterUserOrg(user);
   if (user.status === "suspended" || user.status === "inactive") {
     throw new ApiError(403, `Your account is ${user.status}. Contact administrator.`);
   }
   if (user.isLocked()) throw new ApiError(401, SIGN_IN_FAILED);
-  // Each sign-in's 2FA step works once
-  if (decoded.jti && user.twoFactorStepJti && user.twoFactorStepJti !== decoded.jti) {
+  // Each sign-in's 2FA step works once: it must carry the id issued with it
+  if (!decoded.jti || user.twoFactorStepJti !== decoded.jti) {
     throw new ApiError(401, "Please sign in again.");
   }
 
@@ -176,7 +202,12 @@ const verify2FA = asyncHandler(async (req, res) => {
     await user.incrementLoginAttempts();
     throw new ApiError(401, "Invalid 2FA authentication code");
   }
-  await User.updateOne({ _id: user._id }, { $set: { twoFactorLastCode: codeKey, twoFactorStepJti: null, failedLoginAttempts: 0 }, $unset: { lockUntil: 1 } });
+  // Compare-and-clear: of two requests racing with the same step token, only one wins
+  const claimed = await User.updateOne(
+    { _id: user._id, twoFactorStepJti: decoded.jti },
+    { $set: { twoFactorLastCode: codeKey, twoFactorStepJti: null, failedLoginAttempts: 0 }, $unset: { lockUntil: 1 } }
+  );
+  if (claimed.matchedCount === 0) throw new ApiError(401, "Please sign in again.");
 
   const { accessToken } = await authService.issueSession(req, res, user, { trusted: decoded.trusted !== false });
 
@@ -188,7 +219,7 @@ const verify2FA = asyncHandler(async (req, res) => {
     targetId: user._id
   });
 
-  res.status(200).json(new ApiResponse(200, { user: sanitizeUser(user) }, "2FA verified successfully"));
+  res.status(200).json(new ApiResponse(200, { user: await signedInUser(user) }, "2FA verified successfully"));
 });
 
 const setup2FA = asyncHandler(async (req, res) => {
@@ -255,10 +286,12 @@ const refreshToken = asyncHandler(async (req, res) => {
     throw new ApiError(401, "Please sign in again.", [{ code: "DEVICE_SIGNED_OUT" }]);
   }
 
-  const user = await User.findById(decoded.userId).select("+tokenVersion");
+  const user = await findUserById(decoded.userId, "+tokenVersion");
   if (!user) {
     throw new ApiError(401, "Refresh token is invalid");
   }
+  await assertOrgActive(user);
+  enterUserOrg(user);
   if (user.status === "suspended" || user.status === "inactive") {
     throw new ApiError(403, `Account is currently ${user.status}. Access denied.`);
   }
@@ -283,7 +316,7 @@ const logout = asyncHandler(async (req, res) => {
 });
 
 const getMe = asyncHandler(async (req, res) => {
-  res.status(200).json(new ApiResponse(200, req.user, "Current user profile fetched"));
+  res.status(200).json(new ApiResponse(200, await signedInUser(req.user), "Current user profile fetched"));
 });
 
 /** Signs out every device, including this one. */
@@ -392,46 +425,52 @@ const revokeSession = asyncHandler(async (req, res) => {
   res.status(200).json(new ApiResponse(200, null, "Device signed out"));
 });
 
+/**
+ * POST /auth/forgot-password. Answers at once, the same way for every address, and
+ * only then looks up accounts and sends the links: neither the answer nor how long
+ * it takes reveals whether (or in how many organisations) an address is registered.
+ */
 const forgotPassword = asyncHandler(async (req, res) => {
-  const { email } = req.body;
-  const user = await User.findOne({ email });
-
-  // Always return success to prevent email enumeration
-  if (!user) {
-    return res
-      .status(200)
-      .json(
-        new ApiResponse(200, null, "If that email is registered, a reset link has been sent.")
-      );
-  }
-
-  const resetToken = crypto.randomBytes(32).toString("hex");
-  const hashedToken = crypto.createHash("sha256").update(resetToken).digest("hex");
-
-  user.passwordResetToken = hashedToken;
-  user.passwordResetExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
-  await user.save({ validateBeforeSave: false });
-
-  const resetUrl = `${config.clientUrl}/reset-password/${resetToken}`;
-  const { addEmailJob } = require("../jobs/queue");
-  await addEmailJob({
-    to: user.email,
-    subject: "Password Reset Request",
-    html: `<p>You requested a password reset. Click the link below within 15 minutes:</p><a href="${resetUrl}">${resetUrl}</a><p>If you did not request this, ignore this email.</p>`
-  });
-
-  await recordAuditLog({
-    req,
-    actorId: user._id,
-    action: "password_reset_requested",
-    targetType: "User",
-    targetId: user._id
-  });
-
-  res
-    .status(200)
-    .json(new ApiResponse(200, null, "If that email is registered, a reset link has been sent."));
+  res.status(200).json(new ApiResponse(200, null, "If that email is registered, a reset link has been sent."));
+  sendResetLinks(req, req.body).catch((err) => require("../utils/logger").error(`Password reset links failed: ${err.message}`));
 });
+
+// The same address may hold accounts in several organisations (M5): each gets its
+// own link, named after its organisation, in the same mailbox.
+const sendResetLinks = async (req, { email, organisation }) => {
+  const users = await findAccounts({ email }, { organisation, extra: { status: "active" } });
+  const orgs = users.length ? await getManyPublic(users.filter((u) => u.orgId).map((u) => u.orgId)) : new Map();
+  const { addEmailJob } = require("../jobs/queue");
+  const esc = (v) => String(v || "").replace(/[<>&"]/g, "");
+
+  for (const user of users) {
+    const org = isPlatformUser(user) ? { name: "Platform administration", status: "active" } : orgs.get(String(user.orgId));
+    if (!org || org.status !== "active") continue;
+    const resetToken = crypto.randomBytes(32).toString("hex");
+    const hashedToken = crypto.createHash("sha256").update(resetToken).digest("hex");
+
+    await runAsAccount(user, async () => {
+      user.passwordResetToken = hashedToken;
+      user.passwordResetExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+      await user.save({ validateBeforeSave: false });
+
+      const resetUrl = `${config.clientUrl}/reset-password/${resetToken}`;
+      await addEmailJob({
+        to: user.email,
+        subject: `Password reset for ${esc(org.name)}`,
+        html: `<p>You requested a password reset for your <strong>${esc(org.name)}</strong> account. Click the link below within 15 minutes:</p><a href="${resetUrl}">${resetUrl}</a><p>If you did not request this, ignore this email.</p>`
+      });
+
+      await recordAuditLog({
+        req,
+        actorId: user._id,
+        action: "password_reset_requested",
+        targetType: "User",
+        targetId: user._id
+      });
+    });
+  }
+};
 
 /**
  * Resets the password with an emailed token. The old key bundle was encrypted
@@ -445,14 +484,17 @@ const resetPassword = asyncHandler(async (req, res) => {
 
   const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
 
-  const user = await User.findOne({
-    passwordResetToken: hashedToken,
-    passwordResetExpires: { $gt: Date.now() }
-  }).select("+passwordResetToken +passwordResetExpires");
+  const user = await tenant.runAsSystem(() =>
+    User.findOne({
+      passwordResetToken: hashedToken,
+      passwordResetExpires: { $gt: Date.now() }
+    }).select("+passwordResetToken +passwordResetExpires")
+  );
 
   if (!user) {
     throw new ApiError(400, "Password reset token is invalid or has expired");
   }
+  enterUserOrg(user);
 
   user.setDerivedCredential(authKey, kdfSalt);
   user.keyBundle = undefined;
@@ -533,7 +575,7 @@ const changePassword = asyncHandler(async (req, res) => {
 
   res
     .status(200)
-    .json(new ApiResponse(200, { user: sanitizeUser(user) }, "Password changed. Other devices have been signed out."));
+    .json(new ApiResponse(200, { user: await signedInUser(user) }, "Password changed. Other devices have been signed out."));
 });
 
 module.exports = {

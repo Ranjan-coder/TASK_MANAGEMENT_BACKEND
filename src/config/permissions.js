@@ -8,6 +8,9 @@ const { ROLES } = require("./roles");
  * Each permission lists the API routes it opens (paths relative to /api/v1, same
  * format as accessPolicy.js). Routes also check it at the router (authorize()).
  *
+ * Each belongs to a module (module-access-plan.md, Phase 4): it only works while the
+ * organisation has that module and the person was given it (the module gate checks).
+ *
  * Stored as strings on the user (readable in the audit log); checked as a bitmask,
  * so every check is O(1) however many permissions exist.
  */
@@ -16,18 +19,26 @@ const rule = (method, pattern) => ({ method, regex: new RegExp(`^${pattern}$`) }
 
 const PERMISSIONS = Object.freeze({
   "leads.view": {
+    bit: 0,
+    module: "leads",
     label: "View consultation leads",
     rules: [rule("GET", "/admin/leads")]
   },
   "leads.manage": {
+    bit: 1,
+    module: "leads",
     label: "Work consultation leads (update status and notes)",
     rules: [rule("GET", "/admin/leads"), rule("PATCH", `/admin/leads/${ID}`)]
   },
   "payments.view": {
+    bit: 2,
+    module: "payments",
     label: "View payment schedules",
     rules: [rule("GET", "/admin/payments"), rule("GET", `/admin/payments/${ID}`)]
   },
   "payments.confirm": {
+    bit: 3,
+    module: "payments",
     label: "Confirm or reject customer payments",
     rules: [
       rule("GET", "/admin/payments"),
@@ -37,18 +48,31 @@ const PERMISSIONS = Object.freeze({
     ]
   },
   "performance.view": {
+    bit: 4,
+    module: "performance",
     label: "View business overview, designer performance and reply times",
     rules: [rule("GET", "/admin/monitoring/overview"), rule("GET", "/admin/monitoring/designers"), rule("GET", "/admin/sla/metrics")]
   },
   "projects.view": {
+    bit: 5,
+    module: "projects",
     label: "View all projects and their teams",
     rules: [rule("GET", "/admin/projects"), rule("GET", `/admin/projects/${ID}`)]
   }
 });
 
 const PERMISSION_KEYS = Object.freeze(Object.keys(PERMISSIONS));
-// Bit position per permission, fixed by catalog order
-const BIT = Object.freeze(Object.fromEntries(PERMISSION_KEYS.map((k, i) => [k, 1 << i])));
+// Explicit, append-only bit per permission (never reuse or renumber one), so
+// reordering or inserting entries above can never change what a bit means.
+const BIT = Object.freeze(Object.fromEntries(PERMISSION_KEYS.map((k) => [k, 1 << PERMISSIONS[k].bit])));
+{
+  const seen = new Set();
+  for (const k of PERMISSION_KEYS) {
+    const b = PERMISSIONS[k].bit;
+    if (!Number.isInteger(b) || b < 0 || b > 30 || seen.has(b)) throw new Error(`Permission "${k}" has a missing, invalid or reused bit`);
+    seen.add(b);
+  }
+}
 
 // Roles that get permissions without a grant
 const ROLE_IMPLIED = Object.freeze({

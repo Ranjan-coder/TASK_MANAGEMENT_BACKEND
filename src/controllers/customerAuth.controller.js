@@ -1,5 +1,4 @@
 const User = require("../models/User");
-const config = require("../config/env");
 const ApiError = require("../utils/ApiError");
 const ApiResponse = require("../utils/ApiResponse");
 const asyncHandler = require("../utils/asyncHandler");
@@ -9,89 +8,42 @@ const { ROLES } = require("../config/roles");
 const { recordAuditLog } = require("../services/audit.service");
 const authService = require("../services/auth.service");
 const otpService = require("../services/otp.service");
+const { findAccounts, findUserById, enterUserOrg } = require("../services/accountLookup.service");
+const { getOrgStatus, getManyPublic, orgHasModule } = require("../services/organisation.service");
 const {
-  sanitizeUser,
+  signedInUser,
   startPhoneVerification,
   PHONE_VERIFY_STAGE
 } = require("../services/customerAuth.service");
 
-const ACCOUNT_EXISTS_MESSAGE =
-  "An account with this email or mobile number already exists. Sign in or reset your password.";
 const PHONE_TAKEN_MESSAGE = "This mobile number is already linked to another account.";
+// After a verified reset code, someone with accounts in several organisations picks one
+const RESET_CHOOSE_ORG_STAGE = "reset_choose_org";
 
 const isDuplicateKey = (err) => err && err.code === 11000;
 
-/** Loads the customer behind a phone-verification step token. */
+/** Loads the customer behind a phone-verification step token, scoped to their organisation. */
 const loadPendingCustomer = async (verificationToken, select = "+pendingPhone") => {
   const decoded = authService.verifyStepToken(verificationToken, PHONE_VERIFY_STAGE);
-  const user = await User.findById(decoded.userId).select(select);
+  const user = await findUserById(decoded.userId, select);
   if (!user || user.role !== ROLES.CUSTOMER) {
     throw new ApiError(401, "Your verification session has expired. Please sign in again.", [
       { code: "STEP_TOKEN_INVALID" }
     ]);
   }
   if (user.status === "suspended" || user.status === "inactive") {
-    throw new ApiError(403, `Your account is ${user.status}. Contact Bonito support.`);
+    throw new ApiError(403, `Your account is ${user.status}. Contact support.`);
   }
+  if ((await getOrgStatus(user.orgId)) !== "active") {
+    throw new ApiError(403, "Your organisation's access is paused. Contact your administrator.", [{ code: "ORG_SUSPENDED" }]);
+  }
+  if (!(await orgHasModule(user.orgId, "customer_portal"))) {
+    throw new ApiError(403, "The customer portal isn't available for your organisation.", [{ code: "MODULE_DISABLED", module: "customer_portal" }]);
+  }
+  // Phone uniqueness checks below are per organisation (M5)
+  enterUserOrg(user);
   return user;
 };
-
-/**
- * POST /customer/auth/register
- * Creates a customer (role is always "customer") and sends an OTP to the
- * mobile number. The number becomes the account's phone only once verified.
- */
-const register = asyncHandler(async (req, res) => {
-  const { name, email, phone, authKey, kdfSalt } = req.body;
-  const staffDomains = String(process.env.STAFF_EMAIL_DOMAINS || "bonito.in").split(",").map((d) => d.trim().toLowerCase()).filter(Boolean);
-  if (staffDomains.some((d) => String(email).toLowerCase().endsWith(`@${d}`))) {
-    throw new ApiError(400, "Bonito staff addresses can't be used for customer accounts.");
-  }
-
-  const [emailTaken, phoneTaken] = await Promise.all([
-    User.exists({ email }),
-    User.exists({ phone })
-  ]);
-  if (emailTaken || phoneTaken) {
-    throw new ApiError(409, ACCOUNT_EXISTS_MESSAGE, [{ code: "ACCOUNT_EXISTS" }]);
-  }
-
-  let user;
-  try {
-    user = new User({
-      name,
-      email,
-      pendingPhone: phone,
-      role: ROLES.CUSTOMER,
-      createdBy: null,
-      consent: { termsAcceptedAt: new Date(), privacyVersion: config.privacyPolicyVersion },
-      notificationPrefs: { whatsapp: Boolean(req.body.projectAlerts), sms: false, updatedAt: new Date() }
-    });
-    user.setDerivedCredential(authKey, kdfSalt);
-    await user.save();
-  } catch (err) {
-    if (isDuplicateKey(err)) throw new ApiError(409, ACCOUNT_EXISTS_MESSAGE, [{ code: "ACCOUNT_EXISTS" }]);
-    throw err;
-  }
-
-  if (req.body.referralCode) {
-    await require("../services/referrals.service").recordSignup({ referred: user, code: req.body.referralCode });
-  }
-
-  await recordAuditLog({
-    req,
-    actorId: user._id,
-    action: "customer_registered",
-    targetType: "User",
-    targetId: user._id,
-    metadata: { email: email.replace(/^(.).*(@.*)$/, "$1***$2"), phone: maskPhone(phone), privacyVersion: config.privacyPolicyVersion }
-  });
-
-  const verification = await startPhoneVerification(req, user);
-  res
-    .status(201)
-    .json(new ApiResponse(201, { requiresPhoneVerification: true, ...verification }, "Account created. Verify your mobile number."));
-});
 
 /**
  * POST /customer/auth/otp/send
@@ -174,13 +126,16 @@ const verifyPhone = asyncHandler(async (req, res) => {
   });
 
   if (user.isTwoFactorEnabled) {
-    const tempToken = authService.signStepToken(user._id, "2fa_pending", "5m", { trusted });
+    // Same single-use step as a password sign-in (auth.controller verify2FA)
+    const jti = require("crypto").randomBytes(16).toString("hex");
+    await User.updateOne({ _id: user._id }, { $set: { twoFactorStepJti: jti } });
+    const tempToken = authService.signStepToken(user._id, "2fa_pending", "5m", { trusted, jti });
     return res
       .status(200)
       .json(new ApiResponse(200, { requires2FA: true, tempToken }, "Mobile verified. 2FA verification required."));
   }
 
-  res.status(200).json(new ApiResponse(200, { user: sanitizeUser(user) }, "Mobile number verified"));
+  res.status(200).json(new ApiResponse(200, { user: await signedInUser(user) }, "Mobile number verified"));
 });
 
 const GENERIC_RESET_MESSAGE = "If this number is registered, we've sent a 6-digit code to it.";
@@ -191,18 +146,17 @@ const GENERIC_RESET_MESSAGE = "If this number is registered, we've sent a 6-digi
  */
 const requestPasswordResetOtp = asyncHandler(async (req, res) => {
   const { phone } = req.body;
-  const user = await User.findOne({ phone, status: "active" }).select("_id");
-
-  if (user) {
-    try {
-      await otpService.sendOtp({ phone, purpose: "reset_password", userId: user._id, ipAddress: req.ip });
-    } catch (err) {
-      if (!(err instanceof ApiError)) throw err;
-      logger.warn(`Password reset OTP not sent to ${maskPhone(phone)}: ${err.message}`);
-    }
-  }
-
+  // Answer first, the same way for every number; the lookup and the SMS happen
+  // afterwards, so the response time can't reveal a registered number either
   res.status(200).json(new ApiResponse(200, { resendAfterSeconds: 30 }, GENERIC_RESET_MESSAGE));
+
+  try {
+    // The code proves the phone, whichever organisations it has accounts in
+    const [user] = await findAccounts({ phone }, { select: "_id", extra: { status: "active" } });
+    if (user) await otpService.sendOtp({ phone, purpose: "reset_password", userId: user._id, ipAddress: req.ip });
+  } catch (err) {
+    logger.warn(`Password reset OTP not sent to ${maskPhone(phone)}: ${err.message}`);
+  }
 });
 
 /**
@@ -210,12 +164,38 @@ const requestPasswordResetOtp = asyncHandler(async (req, res) => {
  * Resets the password with a phone OTP and signs out every device.
  */
 const resetPasswordWithOtp = asyncHandler(async (req, res) => {
-  const { phone, code, authKey, kdfSalt } = req.body;
+  const { code, resetToken, organisation, authKey, kdfSalt } = req.body;
+  let { phone } = req.body;
 
-  await otpService.verifyOtp({ phone, purpose: "reset_password", code });
+  let stepToken = null;
+  if (resetToken) {
+    // Second step: the code was already verified, the person picked an organisation
+    stepToken = authService.verifyStepToken(resetToken, RESET_CHOOSE_ORG_STAGE);
+    ({ phone } = stepToken);
+  } else {
+    await otpService.verifyOtp({ phone, purpose: "reset_password", code });
+  }
 
-  const user = await User.findOne({ phone }).select("+refreshTokens");
-  if (!user) throw new ApiError(400, "Invalid or expired code.", [{ code: "OTP_INVALID" }]);
+  const accounts = await findAccounts({ phone }, { organisation, select: "+refreshTokens", extra: { status: "active" } });
+  if (!accounts.length) throw new ApiError(400, "Invalid or expired code.", [{ code: "OTP_INVALID" }]);
+
+  if (accounts.length > 1) {
+    // The phone is proven, so its owner may see which organisations it belongs to
+    const orgs = await getManyPublic(accounts.map((a) => a.orgId));
+    const choices = [...orgs.values()].filter((o) => o.status === "active").map((o) => ({ slug: o.slug, name: o.name }));
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        { chooseOrganisation: true, organisations: choices, resetToken: authService.signStepToken(null, RESET_CHOOSE_ORG_STAGE, "10m", { phone, jti: require("crypto").randomBytes(16).toString("hex") }) },
+        "Choose which organisation's password to reset"
+      )
+    );
+  }
+
+  const [user] = accounts;
+  // One reset per verified code: used up only now, once an account was chosen
+  if (stepToken) await authService.consumeStepToken(stepToken);
+  enterUserOrg(user);
 
   user.setDerivedCredential(authKey, kdfSalt);
   user.keyBundle = undefined; // encrypted with the old password — can no longer be opened
@@ -243,7 +223,6 @@ const resetPasswordWithOtp = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  register,
   sendVerificationOtp,
   verifyPhone,
   requestPasswordResetOtp,

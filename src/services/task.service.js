@@ -4,6 +4,9 @@ const { getIO } = require("../sockets");
 const { sanitizeRichText } = require("../utils/sanitizeHtml");
 
 const createTask = async ({ taskData, creatorId }) => {
+  const { assertStaff } = require("./directory.service");
+  await assertStaff(taskData.assignedTo, "assigned tasks");
+  await assertStaff(taskData.watchers, "watchers");
   if (taskData.description) {
     taskData.description = sanitizeRichText(taskData.description);
   }

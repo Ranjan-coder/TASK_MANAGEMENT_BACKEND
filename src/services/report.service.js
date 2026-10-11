@@ -34,7 +34,7 @@ const REASON_LABELS = {
 // What the person who filed the report is told (no HR details)
 const PUBLIC_OUTCOME = {
   submitted: "Received — we'll review it within 48 hours.",
-  under_review: "Being reviewed by the Bonito team.",
+  under_review: "Being reviewed by the team.",
   action_taken: "Reviewed — action has been taken.",
   dismissed: "Reviewed — no further action was needed."
 };
@@ -95,7 +95,7 @@ const createReport = async ({ reporter, conversationId, reportedUserId, reason, 
   } else if (STAFF_ROLES.includes(reporter.role) && reported.role === ROLES.CUSTOMER && isCustomer(reported._id)) {
     direction = "staff_to_customer";
   } else {
-    throw new ApiError(400, "Customers can report Bonito staff, and staff can flag customers, in their project chats.");
+    throw new ApiError(400, "Customers can report staff, and staff can flag customers, in their project chats.");
   }
   if (!REASONS[direction].includes(reason)) throw new ApiError(400, "Choose one of the listed reasons");
 

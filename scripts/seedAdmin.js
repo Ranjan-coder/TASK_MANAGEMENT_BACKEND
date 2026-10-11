@@ -4,6 +4,8 @@
  *   SEED_ADMIN_EMAIL=admin@bonito.in
  *   SEED_ADMIN_PASSWORD=<initial password>
  *   SEED_ADMIN_NAME="Bonito Admin"        (optional)
+ *   SEED_ORG_SLUG=bonito                  (optional) organisation the account belongs to;
+ *   SEED_ORG_NAME="Bonito"                created if it doesn't exist
  *
  * Usage:
  *   npm run seed:admin              create the account if it does not exist
@@ -19,6 +21,8 @@ const AuditLog = require("../src/models/AuditLog");
 const { ROLES } = require("../src/config/roles");
 const { passwordPolicy } = require("../src/validators/auth.validator");
 const { newSalt, deriveAuthKey } = require("../src/utils/kdf");
+const Organisation = require("../src/models/Organisation");
+const { runInOrg, runAsSystem } = require("../src/utils/tenantContext");
 
 // Same derivation the browser performs (utils/kdf.js), so the login page works
 const setPassword = (user, password) => {
@@ -41,6 +45,18 @@ const main = async () => {
   }
 
   await connectDB(); // same DNS/Atlas settings as the app
+
+  const slug = (process.env.SEED_ORG_SLUG || process.env.TENANT_DEFAULT_SLUG || "bonito").trim().toLowerCase();
+  let org = await Organisation.findOne({ slug });
+  if (!org) {
+    org = await Organisation.create({ slug, name: (process.env.SEED_ORG_NAME || "Bonito").trim() });
+    console.log(`Organisation "${org.name}" (${slug}) created.`);
+  }
+  // Everything below is scoped to that organisation
+  await runInOrg(org._id, () => seedInOrg({ email, password, name, reset }));
+};
+
+const seedInOrg = async ({ email, password, name, reset }) => {
 
   let user = await User.findOne({ email });
   let action;
@@ -95,7 +111,7 @@ const main = async () => {
   }
 };
 
-main()
+runAsSystem(main)
   .catch((err) => {
     console.error(`Seed failed: ${err.message}`);
     process.exitCode = 1;

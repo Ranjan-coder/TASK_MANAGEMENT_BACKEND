@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /**
  * A report about someone in a project chat: a customer reporting a Bonito
@@ -36,7 +37,7 @@ const noteSchema = new mongoose.Schema(
 
 const reportSchema = new mongoose.Schema(
   {
-    ticketNo: { type: Number, required: true, unique: true },
+    ticketNo: { type: Number, required: true },
     conversation: { type: mongoose.Schema.Types.ObjectId, ref: "Conversation", required: true },
     reporter: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     reportedUser: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
@@ -65,12 +66,14 @@ const reportSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+reportSchema.index({ orgId: 1, ticketNo: 1 }, { unique: true }); // ticket numbers count per organisation
 reportSchema.index({ status: 1, createdAt: -1 });
 reportSchema.index({ reportedUser: 1, createdAt: -1 });
 reportSchema.index({ reporter: 1, createdAt: -1 });
 reportSchema.index({ conversation: 1 });
 reportSchema.index({ direction: 1, createdAt: -1 });
 
+reportSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 const Report = mongoose.model("Report", reportSchema);
 module.exports = Report;
 module.exports.REASONS = REASONS;

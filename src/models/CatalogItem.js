@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /** A product or service shown to customers (e.g. "Modular kitchen — L-shape"). */
 const catalogItemSchema = new mongoose.Schema(
@@ -7,7 +8,7 @@ const catalogItemSchema = new mongoose.Schema(
     kind: { type: String, enum: ["product", "service", "portfolio"], required: true },
     category: { type: String, required: true, trim: true, maxlength: 50 },
     name: { type: String, required: true, trim: true, maxlength: 120 },
-    slug: { type: String, required: true, unique: true, lowercase: true, trim: true, maxlength: 140 },
+    slug: { type: String, required: true, lowercase: true, trim: true, maxlength: 140 },
     summary: { type: String, trim: true, maxlength: 200, default: "" },
     description: { type: String, trim: true, maxlength: 3000, default: "" }, // plain text
     images: {
@@ -37,5 +38,7 @@ const catalogItemSchema = new mongoose.Schema(
 );
 
 catalogItemSchema.index({ isPublished: 1, kind: 1, category: 1, order: 1 });
+catalogItemSchema.index({ orgId: 1, slug: 1 }, { unique: true });
 
+catalogItemSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("CatalogItem", catalogItemSchema);

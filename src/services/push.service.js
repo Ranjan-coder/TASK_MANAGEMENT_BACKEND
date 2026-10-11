@@ -68,7 +68,7 @@ const sendToUser = async (userId, payload) => {
   if (!subs.length || !user || user.status !== "active") return 0;
   const active = new Set((user.currentSessions || []).map((s) => s.sessionId));
   const body = JSON.stringify({
-    title: String(payload.title || "Bonito").slice(0, 120),
+    title: String(payload.title || (await require("./organisation.service").currentBrandName())).slice(0, 120),
     body: String(payload.body || "").slice(0, 300),
     url: typeof payload.url === "string" && payload.url.startsWith("/") ? payload.url : "/",
     tag: payload.tag ? String(payload.tag).slice(0, 64) : undefined
@@ -98,6 +98,8 @@ const sendToUser = async (userId, payload) => {
 const urlForNotification = (n) => {
   if (n.relatedTask) return `/tasks/${n.relatedTask}`;
   if (n.relatedConversation) return `/chat/${n.relatedConversation}`;
+  if (n.type === "planner_reminder") return "/planner?tab=reminders";
+  if (String(n.type || "").startsWith("meeting_")) return "/planner?tab=meetings";
   return "/notifications";
 };
 

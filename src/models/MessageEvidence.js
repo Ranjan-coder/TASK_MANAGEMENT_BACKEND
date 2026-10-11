@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /**
  * Original (still end-to-end encrypted) content of project-chat messages that
@@ -26,4 +27,5 @@ messageEvidenceSchema.index({ message: 1, createdAt: 1 });
 messageEvidenceSchema.index({ conversation: 1, createdAt: -1 });
 messageEvidenceSchema.index({ createdAt: 1 }, { expireAfterSeconds: 365 * 24 * 60 * 60 });
 
+messageEvidenceSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("MessageEvidence", messageEvidenceSchema);

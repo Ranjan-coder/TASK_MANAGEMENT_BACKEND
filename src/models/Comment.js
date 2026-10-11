@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 const commentSchema = new mongoose.Schema(
   {
@@ -49,5 +50,6 @@ const commentSchema = new mongoose.Schema(
 
 commentSchema.index({ task: 1, createdAt: -1 });
 
+commentSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 const Comment = mongoose.model("Comment", commentSchema);
 module.exports = Comment;

@@ -1,4 +1,5 @@
 const express = require("express");
+const resumeTenant = require("../middlewares/tenantResume.middleware");
 const multer = require("multer");
 const { z } = require("zod");
 const authMiddleware = require("../middlewares/auth.middleware");
@@ -142,7 +143,7 @@ adminPaymentRoutes.post(
   "/:projectId/milestones/:milestoneId/invoice",
   payAdmin,
   validate(z.object({ params: msParams })),
-  pdfUpload.single("file"),
+  resumeTenant(pdfUpload.single("file")),
   asyncHandler(async (req, res) => {
     const ApiError = require("../utils/ApiError");
     if (!req.file) throw new ApiError(400, "Choose a PDF file");

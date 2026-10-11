@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 const activityItemSchema = new mongoose.Schema({
   action: {
@@ -108,5 +109,6 @@ taskSchema.index({ dueDate: 1 });
 taskSchema.index({ isArchived: 1 });
 taskSchema.index({ title: "text", description: "text" });
 
+taskSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 const Task = mongoose.model("Task", taskSchema);
 module.exports = Task;

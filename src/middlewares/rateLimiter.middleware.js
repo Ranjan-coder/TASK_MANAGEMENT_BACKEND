@@ -71,9 +71,11 @@ const authLimiter = createLimiter({
   message: "Too many login attempts from this IP/account. Please try again in 15 minutes."
 });
 
+// Requests per minute per network before sign-in is known. Offices where many people
+// share one connection may need more (API_RATE_LIMIT_PER_MIN); signed-in limits are per person.
 const apiLimiter = createLimiter({
   windowMs: 60 * 1000,
-  max: 120,
+  max: Number(process.env.API_RATE_LIMIT_PER_MIN) || 120,
   message: "Too many requests. Please slow down."
 });
 

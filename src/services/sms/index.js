@@ -47,7 +47,7 @@ const providers = {
 
 // ── "Your designer replied" alerts (customers who opted in) ─────────────────
 // Only generic text: the project name and a link. Never message content.
-const alertText = ({ designer, project, url }) => `Bonito: ${designer} replied in your project chat "${project}". Open the app to read it: ${url}`;
+const alertText = ({ designer, project, url }) => `${designer} replied in your project chat "${project}". Open the app to read it: ${url}`;
 
 const msg91Post = async (url, body) => {
   const response = await fetch(url, {

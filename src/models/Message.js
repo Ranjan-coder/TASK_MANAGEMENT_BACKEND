@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 const attachmentSchema = new mongoose.Schema(
   {
@@ -133,5 +134,6 @@ messageSchema.index({ conversation: 1, createdAt: -1 });
 messageSchema.index({ sender: 1 });
 messageSchema.index({ conversation: 1, isDeleted: 1 });
 
+messageSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 const Message = mongoose.model("Message", messageSchema);
 module.exports = Message;

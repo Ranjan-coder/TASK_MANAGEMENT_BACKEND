@@ -18,6 +18,8 @@ const createUserSchema = z.object({
       authKey: authKeySchema,
       kdfSalt: saltSchema,
       role: roleEnum.optional(),
+      // Customers only: the code of the customer who referred them (never blocks creation)
+      referralCode: z.string().trim().max(20).regex(/^[A-Za-z0-9-]*$/, "Invalid referral code").optional(),
       ...orgFields
     })
     .strict()

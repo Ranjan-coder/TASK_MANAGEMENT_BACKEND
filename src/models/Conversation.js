@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 const PROJECT_STAGES = ["consultation", "site_measurement", "design", "quotation", "production", "installation", "handover"];
 
@@ -161,6 +162,7 @@ conversationSchema.index({ isArchived: 1, "members.user": 1 });
 // Customer Home, payments, monitoring and privacy all look projects up by customer
 conversationSchema.index({ "project.customers": 1, lastActivityAt: -1 }, { sparse: true });
 
+conversationSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 const Conversation = mongoose.model("Conversation", conversationSchema);
 module.exports = Conversation;
 module.exports.PROJECT_STAGES = PROJECT_STAGES;

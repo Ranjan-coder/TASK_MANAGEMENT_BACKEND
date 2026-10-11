@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /**
  * A friend referred by a customer (R9).
@@ -22,4 +23,5 @@ const referralSchema = new mongoose.Schema(
 referralSchema.index({ referrer: 1, createdAt: -1 });
 referralSchema.index({ status: 1, createdAt: -1 });
 
+referralSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("Referral", referralSchema);

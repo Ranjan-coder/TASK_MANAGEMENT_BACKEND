@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const cloudinary = require("../config/cloudinary");
+const { orgFolder } = require("../services/media.service");
 const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
 const ApiError = require("../utils/ApiError");
@@ -71,7 +72,7 @@ const uploadChatAttachment = asyncHandler(async (req, res) => {
         new Promise((resolve, reject) => {
           const stream = cloudinary.uploader.upload_stream(
             {
-              folder: "task_manager/chat_attachments",
+              folder: orgFolder("chat_attachments"),
               timeout: 60000,
               resource_type: "raw", // Always raw — file is encrypted binary
               public_id: uniqueId,

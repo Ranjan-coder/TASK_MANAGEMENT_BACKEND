@@ -22,6 +22,14 @@ const EMPTY = new Set(["", "general", "staff", "customers", "customer", "na", "n
 
 const main = async () => {
   await mongoose.connect(process.env.MONGO_URI);
+  // Runs inside one organisation (TENANT_DEFAULT_SLUG, default "bonito")
+  const Organisation = require("../src/models/Organisation");
+  const tenantOrg = await Organisation.findOne({ slug: (process.env.TENANT_DEFAULT_SLUG || "bonito").toLowerCase() });
+  if (!tenantOrg) throw new Error("Run scripts/migrateTenancy.js --apply first");
+  return require("../src/utils/tenantContext").runInOrg(tenantOrg._id, inOrg);
+};
+
+const inOrg = async () => {
   const s = await org.load();
   // Designations also match by abbreviation ("GM", "BM", "GTM")
   const desigByShort = new Map(s.designations.filter((g) => g.short).map((g) => [orgKey(g.short), g]));
@@ -78,7 +86,7 @@ const main = async () => {
   await mongoose.disconnect();
 };
 
-main().catch((err) => {
+require("../src/utils/tenantContext").runAsSystem(main).catch((err) => {
   console.error(err);
   process.exit(1);
 });

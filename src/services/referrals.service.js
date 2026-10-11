@@ -4,7 +4,7 @@ const Referral = require("../models/Referral");
 const Lead = require("../models/Lead");
 const ApiError = require("../utils/ApiError");
 const logger = require("../utils/logger");
-const config = require("../config/env");
+const { requireOrgId } = require("../utils/tenantContext");
 const { ROLES } = require("../config/roles");
 const { getSlaSettings, getEscalationRecipients } = require("./settings.service");
 
@@ -62,7 +62,8 @@ const getMine = async (userId) => {
   return {
     ...prog,
     code,
-    link: code ? `${config.clientUrl}/signup?ref=${encodeURIComponent(code)}` : null,
+    // Customers are added by the organisation (M2), so friends share the code with the team instead of a sign-up link
+    link: null,
     needsVerification: !user.phoneVerified,
     // Friends are shown by first name only
     referrals: refs.map((r) => ({ _id: r._id, friend: firstName(r.referred?.name), status: r.status, createdAt: r.createdAt, rewardedAt: r.rewardedAt })),
@@ -100,7 +101,9 @@ const recordSignup = async ({ referred, code }) => {
     }
     const ref = await Referral.create({ referrer: referrer._id, referred: referred._id, code: normaliseCode(code) });
     // Marketing follows the friend up like any consultation request
-    await Lead.create({ customer: referred._id, campaign: null, message: `Referred by ${referrer.name}` }).catch(() => {});
+    if (await require("./organisation.service").orgHasModule(requireOrgId(), "leads")) {
+      await Lead.create({ customer: referred._id, campaign: null, message: `Referred by ${referrer.name}` }).catch(() => {});
+    }
     return ref;
   } catch (err) {
     if (err.code !== 11000) logger.warn(`Referral not recorded: ${err.message}`);
@@ -124,7 +127,7 @@ const onFirstPayment = async (customerIds, projectCustomerIds = customerIds) => 
       recipient: ref.referrer,
       type: "project_update",
       title: "Your referral qualified 🎉",
-      message: `${firstName(friend.name)} started their project with Bonito. We'll confirm your reward soon.`
+      message: `${firstName(friend.name)} started their project. We'll confirm your reward soon.`
     }).catch(() => {});
     for (const a of await getEscalationRecipients()) {
       sendNotification({ recipient: a._id, type: "project_update", title: "Referral reward to approve", message: "A referred customer made their first payment. Review it in Admin → Referrals." }).catch(() => {});

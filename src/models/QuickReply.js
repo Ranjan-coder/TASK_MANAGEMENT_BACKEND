@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /**
  * Saved reply templates for staff (R5). owner = null means shared with all
@@ -17,4 +18,5 @@ const quickReplySchema = new mongoose.Schema(
 
 quickReplySchema.index({ owner: 1, title: 1 });
 
+quickReplySchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("QuickReply", quickReplySchema);

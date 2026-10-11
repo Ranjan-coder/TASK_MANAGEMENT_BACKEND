@@ -1,5 +1,6 @@
 const { z } = require("zod");
 const { authKeySchema, saltSchema } = require("../utils/kdf");
+const { SLUG_RE } = require("../models/Organisation");
 
 // The browser encrypts the user's chat keys with a key derived from the password,
 // then sends that encrypted bundle here (server cannot read it).
@@ -24,8 +25,28 @@ const passwordPolicy = z
 
 const identifierSchema = z.string().trim().min(3, "Enter your email or mobile number").max(254);
 
+// Organisation code (slug). Optional where a step is already bound to a proven
+// phone (customer reset); required at sign-in (decision D-R1, below).
+const organisationCode = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(SLUG_RE, "Enter a valid organisation code")
+  .optional()
+  .or(z.literal("").transform(() => undefined));
+
+// Sign-in always names the organisation (module-access-plan.md, D-R1): every lookup
+// is then scoped to one organisation, so no answer can be compared across
+// organisations to learn where an email or phone has an account. The product owner
+// uses the reserved code "platform".
+const requiredOrganisationCode = z
+  .string({ required_error: "Enter your organisation code" })
+  .trim()
+  .toLowerCase()
+  .regex(SLUG_RE, "Enter a valid organisation code");
+
 const preloginSchema = z.object({
-  body: z.object({ identifier: identifierSchema }).strict()
+  body: z.object({ identifier: identifierSchema, organisation: requiredOrganisationCode }).strict()
 });
 
 // Login with email or mobile number + authKey (derived from the password in the browser).
@@ -37,7 +58,8 @@ const loginSchema = z.object({
       authKey: authKeySchema,
       password: legacyPassword.optional(),
       // false on shared computers: short session, chat keys kept in memory only
-      trustDevice: z.boolean().optional()
+      trustDevice: z.boolean().optional(),
+      organisation: requiredOrganisationCode
     })
     .strict()
 });
@@ -51,7 +73,8 @@ const verify2FASchema = z.object({
 
 const forgotPasswordSchema = z.object({
   body: z.object({
-    email: z.string().trim().toLowerCase().email("Invalid email address")
+    email: z.string().trim().toLowerCase().email("Invalid email address"),
+    organisation: requiredOrganisationCode
   })
 });
 
@@ -88,13 +111,14 @@ const disable2FASchema = z.object({
       authKey: authKeySchema.optional(),
       password: legacyPassword.optional(),
       // A current code from the authenticator app, so a stolen session alone can't turn 2FA off
-      code: z.string().trim().regex(/^d{6}$/, "Enter the 6-digit code from your authenticator app")
+      code: z.string().trim().regex(/^\d{6}$/, "Enter the 6-digit code from your authenticator app")
     })
     .strict()
     .refine((d) => d.authKey || d.password, { message: "Password is required", path: ["authKey"] })
 });
 
 module.exports = {
+  organisationCode,
   passwordPolicy,
   keyBundleSchema,
   preloginSchema,

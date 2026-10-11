@@ -43,7 +43,10 @@ const MOUNTS = {
   "/api/v1/payments": require("../src/routes/phase10.routes").paymentRoutes,
   "/api/v1/referrals": require("../src/routes/phase10.routes").referralRoutes,
   "/api/v1/customer/auth": require("../src/routes/customerAuth.routes"),
-  "/api/v1/org": require("../src/routes/org.routes")
+  "/api/v1/org": require("../src/routes/org.routes"),
+  "/api/v1/platform": require("../src/routes/platform.routes"),
+  // Packaged modules mount their own routers (src/modules/index.js)
+  ...Object.fromEntries(require("../src/modules/catalog").MANIFESTS.filter((m) => m.router).map((m) => [`/api/v1${m.paths[0]}`, m.router()]))
 };
 
 const SAMPLE_ID = "64b7f0c2a1b2c3d4e5f60718";
@@ -73,7 +76,7 @@ test("the app loads and exposes routes", () => {
 test("customers reach only auth, notifications, profile, chat, campaigns, catalog, report and rating routes", () => {
   const unexpected = allowedForCustomer.filter(
     (r) =>
-      !/^\/api\/v1\/(auth|customer\/auth|notifications|chat|campaigns|catalog|reports|ratings|moderation|projects|testimonials|push|privacy|payments|referrals)(\/|$)/.test(r.path) &&
+      !/^\/api\/v1\/(auth|customer\/auth|notifications|chat|campaigns|catalog|reports|ratings|moderation|projects|testimonials|push|privacy|payments|referrals|planner)(\/|$)/.test(r.path) &&
       !["/api/v1/users/profile", "/api/v1/uploads/avatar"].includes(r.path)
   );
   expect(unexpected).toEqual([]);
@@ -165,7 +168,7 @@ test("leadership reaches only read-only oversight routes (never a change outside
   const writes = reach.filter(
     (r) =>
       r.method !== "GET" &&
-      !/^\/api\/v1\/(auth|notifications|chat|moderation|push|privacy)(\/|$)/.test(r.path) &&
+      !/^\/api\/v1\/(auth|notifications|chat|moderation|push|privacy|planner)(\/|$)/.test(r.path) &&
       !["/api/v1/users/profile", "/api/v1/uploads/avatar"].includes(r.path)
   );
   expect(writes.map(key)).toEqual([]);
@@ -227,4 +230,72 @@ test("every leadership and permission rule matches a real route (no stale rules)
   const rules = [...ROLE_ALLOW_LISTS.leadership, ...permissionRules(all)];
   const stale = rules.filter((rule) => !routes.some((r) => (rule.method === "*" || rule.method === r.method) && rule.regex.test(normalisePath(r.url))));
   expect(stale.map((r) => `${r.method} ${r.regex}`)).toEqual([]);
+});
+
+test("the product owner reaches only their console, sign-in, notifications and push (never organisation data)", () => {
+  const owner = { role: "platform_owner", isTwoFactorEnabled: true, mustChangePassword: false, permissions: [] };
+  const outside = allowedFor(owner).filter((r) => !/^\/api\/v1\/(auth|platform|notifications|push)(\/|$)/.test(r.path));
+  // The one exception: reading their own (encrypted) key backup, needed to change the password
+  expect(outside.map(key)).toEqual(["GET /api/v1/chat/keys/bundle"]);
+  expect(allowedFor(owner).some((r) => r.path.startsWith("/api/v1/platform"))).toBe(true);
+});
+
+test("no organisation role reaches the product owner console through the allow-lists", () => {
+  for (const role of ["customer", "marketing", "leadership"]) {
+    const user = { role, isTwoFactorEnabled: true, mustChangePassword: false, permissions: [] };
+    expect(allowedFor(user).filter((r) => r.path.startsWith("/api/v1/platform")).map(key)).toEqual([]);
+  }
+  // superadmin / admin / user aren't allow-listed: the platform router's role check refuses them
+  const platformRouter = require("../src/routes/platform.routes");
+  expect(platformRouter.stack.length).toBeGreaterThan(2);
+});
+
+// ── Module gate (module-access-plan.md, Phase 3) ─────────────────────────────
+const { moduleForPath } = require("../src/config/moduleRoutes");
+const { checkModuleAccess } = require("../src/middlewares/moduleGate");
+const modulesCfg = require("../src/config/modules");
+
+test("every authenticated route belongs to a module (unmapped routes would be refused)", () => {
+  const unmapped = routes
+    .filter((r) => !r.path.startsWith("/api/v1/customer/auth"))
+    .filter((r) => !moduleForPath(normalisePath(r.url)));
+  expect(unmapped.map(key)).toEqual([]);
+});
+
+test("specific paths win over their parent (longest prefix)", () => {
+  expect(moduleForPath("/uploads/avatar")).toBe("core");
+  expect(moduleForPath("/uploads/abc")).toBe("tasks");
+  expect(moduleForPath(`/campaigns/${SAMPLE_ID}/lead`)).toBe("leads");
+  expect(moduleForPath(`/campaigns/${SAMPLE_ID}/events`)).toBe("marketing");
+  expect(moduleForPath("/campaigns/live")).toBe("marketing");
+  // A campaign's leads are customers' contact details: they need Leads, not just Marketing
+  expect(moduleForPath(`/admin/campaigns/${SAMPLE_ID}/leads`)).toBe("leads");
+  expect(moduleForPath(`/admin/campaigns/${SAMPLE_ID}`)).toBe("marketing");
+  expect(moduleForPath("/admin/monitoring/customers")).toBe("customer_portal");
+  expect(moduleForPath("/admin/monitoring/overview")).toBe("performance");
+  expect(moduleForPath("/dashboard/audit-logs")).toBe("core");
+  expect(moduleForPath("/nothing-here")).toBeNull();
+});
+
+test("the gate refuses a module the organisation doesn't have", () => {
+  const staff = { role: "admin" };
+  const coreOnly = modulesCfg.CORE_MASK;
+  const withTasks = modulesCfg.effectiveMask(modulesCfg.toMask(["tasks"]));
+  expect(checkModuleAccess({ user: staff, originalUrl: "/api/v1/tasks", orgMask: coreOnly })).toMatchObject({ allowed: false, code: "MODULE_DISABLED", module: "tasks" });
+  expect(checkModuleAccess({ user: staff, originalUrl: "/api/v1/tasks", orgMask: withTasks }).allowed).toBe(true);
+  expect(checkModuleAccess({ user: staff, originalUrl: "/api/v1/users", orgMask: coreOnly }).allowed).toBe(true);
+  expect(checkModuleAccess({ user: staff, originalUrl: "/api/v1/unknown", orgMask: modulesCfg.ALL_MASK }).code).toBe("ROUTE_UNMAPPED");
+  // Case and slash tricks resolve to the same module
+  expect(checkModuleAccess({ user: staff, originalUrl: "/API/v1//Tasks/", orgMask: coreOnly }).allowed).toBe(false);
+});
+
+test("customers need the customer portal for everything except signing in and out", () => {
+  const cust = { role: "customer" };
+  const noPortal = modulesCfg.effectiveMask(modulesCfg.toMask(["projects", "chat"]));
+  expect(checkModuleAccess({ user: cust, originalUrl: "/api/v1/notifications", orgMask: noPortal }).module).toBe("customer_portal");
+  expect(checkModuleAccess({ user: cust, originalUrl: "/api/v1/auth/logout", orgMask: noPortal }).allowed).toBe(true);
+  const portal = modulesCfg.effectiveMask(modulesCfg.toMask(["projects", "customer_portal", "chat"]));
+  // Without Projects, both chat and the portal are out of effect (they need it)
+  expect(checkModuleAccess({ user: cust, originalUrl: "/api/v1/chat/conversations", orgMask: modulesCfg.effectiveMask(modulesCfg.toMask(["customer_portal", "chat"])) }).allowed).toBe(false);
+  expect(checkModuleAccess({ user: cust, originalUrl: "/api/v1/chat/conversations", orgMask: portal }).allowed).toBe(true);
 });

@@ -8,7 +8,13 @@ const { evaluateAccess } = require("../src/middlewares/accessPolicy");
 
 const CLOUD = config.cloudinary.cloudName || "testcloud";
 config.cloudinary.cloudName = CLOUD;
-const img = (id = "bonito/campaigns/123_abc") => ({
+// Media checks run inside an organisation: files must be in its own folder
+const tenant = require("../src/utils/tenantContext");
+const ORG = "64b7f0c2a1b2c3d4e5f60799";
+const OTHER_ORG = "64b7f0c2a1b2c3d4e5f60798";
+const inOrg = (fn, org = ORG) => tenant.runInOrg(org, fn);
+const ownMedia = (...args) => inOrg(() => isOwnMedia(...args));
+const img = (id = `org_${ORG}/campaigns/123_abc`) => ({
   url: media.imageUrl(id),
   publicId: id,
   resourceType: "image"
@@ -19,7 +25,7 @@ const base = {
   media: img(),
   startAt: "2026-10-01T00:00:00.000Z"
 };
-const parse = (body) => v.createCampaignSchema.parse({ body });
+const parse = (body) => inOrg(() => v.createCampaignSchema.parse({ body }));
 
 describe("campaign validation", () => {
   test("accepts a basic image campaign with defaults", () => {
@@ -31,13 +37,13 @@ describe("campaign validation", () => {
   test("rejects media that wasn't uploaded through our Cloudinary folders", () => {
     expect(() => parse({ ...base, media: { ...img(), url: "https://evil.example.com/pixel.png" } })).toThrow();
     expect(() => parse({ ...base, media: img("other/folder/x") })).toThrow();
-    expect(isOwnMedia(img().url, img().publicId, "catalog")).toBe(false);
+    expect(ownMedia(img().url, img().publicId, "catalog")).toBe(false);
     // Only URLs the server itself builds for that file: no remote "fetch" URLs, no other accounts, no path tricks
-    const cloudBase = media.imageUrl("bonito/campaigns/123_abc").split("/image/")[0];
-    expect(isOwnMedia(`${cloudBase}/image/fetch/https://tracker.example/x.png`, "bonito/campaigns/123_abc", "campaign")).toBe(false);
-    expect(isOwnMedia(`${cloudBase}/../othercloud/image/upload/x`, "bonito/campaigns/123_abc", "campaign")).toBe(false);
-    expect(isOwnMedia(media.imageUrl("bonito/campaigns/../catalog/x"), "bonito/campaigns/../catalog/x", "campaign")).toBe(false);
-    expect(isOwnMedia(media.imageUrl("bonito/campaigns/other_file"), "bonito/campaigns/123_abc", "campaign")).toBe(false);
+    const cloudBase = media.imageUrl(`org_${ORG}/campaigns/123_abc`).split("/image/")[0];
+    expect(ownMedia(`${cloudBase}/image/fetch/https://tracker.example/x.png`, `org_${ORG}/campaigns/123_abc`, "campaign")).toBe(false);
+    expect(ownMedia(`${cloudBase}/../othercloud/image/upload/x`, `org_${ORG}/campaigns/123_abc`, "campaign")).toBe(false);
+    expect(ownMedia(media.imageUrl(`org_${ORG}/campaigns/../catalog/x`), `org_${ORG}/campaigns/../catalog/x`, "campaign")).toBe(false);
+    expect(ownMedia(media.imageUrl(`org_${ORG}/campaigns/other_file`), `org_${ORG}/campaigns/123_abc`, "campaign")).toBe(false);
   });
 
   test("end date must be after start date; media must match the kind", () => {
@@ -68,19 +74,31 @@ describe("campaign validation", () => {
   });
 });
 
+describe("media belongs to one organisation", () => {
+  test("another organisation's files are refused, and so is everything outside a request", () => {
+    const theirs = `org_${OTHER_ORG}/campaigns/123_abc`;
+    expect(ownMedia(media.imageUrl(theirs), theirs, "campaign")).toBe(false);
+    expect(inOrg(() => isOwnMedia(media.imageUrl(theirs), theirs, "campaign"), OTHER_ORG)).toBe(true);
+    expect(isOwnMedia(img().url, img().publicId, "campaign")).toBe(false); // no organisation context
+    // The old shared folder only counts for the first organisation (not this one)
+    expect(ownMedia(media.imageUrl("bonito/campaigns/1_a"), "bonito/campaigns/1_a", "campaign")).toBe(false);
+  });
+});
+
 describe("catalog validation", () => {
   test("images must come from the catalog folder; price is a whole number", () => {
     const ok = {
       kind: "service",
       category: "Modular Kitchen",
       name: "L-shaped kitchen",
-      images: [{ url: media.imageUrl("bonito/catalog/1_a"), publicId: "bonito/catalog/1_a" }],
+      images: [{ url: media.imageUrl(`org_${ORG}/catalog/1_a`), publicId: `org_${ORG}/catalog/1_a` }],
       startingPrice: 150000
     };
-    expect(v.createCatalogSchema.parse({ body: ok }).body.isPublished).toBe(false);
-    expect(() => v.createCatalogSchema.parse({ body: { ...ok, images: [img()] } })).toThrow();
-    expect(() => v.createCatalogSchema.parse({ body: { ...ok, startingPrice: 99.5 } })).toThrow();
-    expect(() => v.createCatalogSchema.parse({ body: { ...ok, slug: "custom" } })).toThrow();
+    const cat = (body) => inOrg(() => v.createCatalogSchema.parse({ body }));
+    expect(cat(ok).body.isPublished).toBe(false);
+    expect(() => cat({ ...ok, images: [img()] })).toThrow();
+    expect(() => cat({ ...ok, startingPrice: 99.5 })).toThrow();
+    expect(() => cat({ ...ok, slug: "custom" })).toThrow();
   });
 
   test("slugs are URL-safe", () => {

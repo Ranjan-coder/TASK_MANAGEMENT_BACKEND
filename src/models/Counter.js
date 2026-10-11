@@ -1,11 +1,15 @@
 const mongoose = require("mongoose");
+const { requireOrgId } = require("../utils/tenantContext");
 
-/** Atomic sequences (e.g. report ticket numbers). */
+/**
+ * Atomic sequences (e.g. report ticket numbers). Each organisation counts on its
+ * own: the document id is "<orgId>:<name>", so one atomic $inc stays O(1).
+ */
 const counterSchema = new mongoose.Schema({ _id: String, seq: { type: Number, default: 0 } }, { versionKey: false });
 const Counter = mongoose.model("Counter", counterSchema);
 
 const nextSequence = async (name, start = 1000) => {
-  const doc = await Counter.findOneAndUpdate({ _id: name }, { $inc: { seq: 1 } }, { upsert: true, new: true });
+  const doc = await Counter.findOneAndUpdate({ _id: `${requireOrgId()}:${name}` }, { $inc: { seq: 1 } }, { upsert: true, new: true });
   return start + doc.seq;
 };
 

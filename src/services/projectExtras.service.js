@@ -129,7 +129,7 @@ const approvalEvent = (approval) =>
 
 const requestApproval = async ({ conversationId, actor, messageId, title }) => {
   const conv = await loadProject(conversationId);
-  if (!isMember(conv, actor._id) || !STAFF_ROLES.includes(actor.role)) throw new ApiError(403, "Only the Bonito team in this chat can ask for approval");
+  if (!isMember(conv, actor._id) || !STAFF_ROLES.includes(actor.role)) throw new ApiError(403, "Only the design team in this chat can ask for approval");
   const message = await Message.findOne({ _id: messageId, conversation: conv._id });
   if (!message || message.isDeleted) throw new ApiError(404, "Message not found");
   if (!["image", "file"].includes(message.type) || !message.attachments?.length) throw new ApiError(400, "Ask for approval on a design you've posted (an image or file)");

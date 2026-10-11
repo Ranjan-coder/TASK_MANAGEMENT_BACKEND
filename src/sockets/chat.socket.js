@@ -2,6 +2,7 @@ const Conversation = require("../models/Conversation");
 const logger = require("../utils/logger");
 const redisClient = require("../config/redis");
 const chatService = require("../services/chat.service");
+const { runAsAccount } = require("../services/accountLookup.service");
 
 // Typing debounce timers: Map<`${socketId}:${convId}`, NodeJS.Timeout>
 const typingTimers = new Map();
@@ -147,7 +148,10 @@ const registerChatEvents = (socket, io) => {
   });
 
   // ── Cleanup on disconnect ──────────────────────────────────────────────────
-  socket.on("disconnect", async () => {
+  // "disconnect" is a reserved event: it skips socket.use(), so it re-enters the
+  // user's organisation itself (presence looks up their conversations)
+  socket.on("disconnect", () => runAsAccount(socket.user, onDisconnect));
+  const onDisconnect = async () => {
     // Clean up typing timers for this socket
     for (const [key] of typingTimers) {
       if (key.startsWith(`${socket.id}:`)) {
@@ -161,7 +165,7 @@ const registerChatEvents = (socket, io) => {
       if (remaining.length) return;
     } catch { /* fall through */ }
     await setOffline(userId, io);
-  });
+  };
 };
 
 module.exports = { registerChatEvents, setOnline };

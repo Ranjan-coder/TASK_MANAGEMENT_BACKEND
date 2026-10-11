@@ -63,4 +63,16 @@ const startPhoneVerification = async (req, user, { trusted = true } = {}) => {
   return result;
 };
 
-module.exports = { sanitizeUser, startPhoneVerification, PHONE_VERIFY_STAGE };
+/** The signed-in user as the app receives it, with their organisation and its modules. */
+const signedInUser = async (user) => {
+  const { getPublicOrg } = require("./organisation.service");
+  const { modulesFor } = require("./moduleAccess.service");
+  return {
+    ...sanitizeUser(user),
+    organisation: user.orgId ? await getPublicOrg(user.orgId) : null,
+    // What this person can use: the organisation's modules AND the ones they were given
+    modules: await modulesFor(user)
+  };
+};
+
+module.exports = { sanitizeUser, signedInUser, startPhoneVerification, PHONE_VERIFY_STAGE };

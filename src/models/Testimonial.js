@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /** A customer testimonial shown on the customer Home page (R6), entered by marketing/admin with the customer's permission. */
 const testimonialSchema = new mongoose.Schema(
@@ -20,4 +21,5 @@ const testimonialSchema = new mongoose.Schema(
 
 testimonialSchema.index({ isPublished: 1, order: 1 });
 
+testimonialSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("Testimonial", testimonialSchema);

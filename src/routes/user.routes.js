@@ -12,7 +12,7 @@ const {
   updateStatusSchema,
   updateProfileSchema
 } = require("../validators/user.validator");
-const { permissionsSchema } = require("../validators/org.validator");
+const { permissionsSchema, userModulesSchema } = require("../validators/org.validator");
 
 router.use(authMiddleware);
 
@@ -56,6 +56,10 @@ router.patch(
   validate(permissionsSchema),
   userController.updateUserPermissions
 );
+
+// Modules this person may use (superadmin only; module-access-plan.md Phase 4)
+router.get("/:id/modules", rbacMiddleware("superadmin"), userController.getUserModules);
+router.patch("/:id/modules", rbacMiddleware("superadmin"), validate(userModulesSchema), userController.updateUserModules);
 
 // Change status (admin/superadmin)
 router.patch(

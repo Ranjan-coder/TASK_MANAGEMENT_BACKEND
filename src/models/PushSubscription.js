@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /**
  * A browser/phone registered for web push. Tied to the sign-in session that
@@ -8,7 +9,7 @@ const pushSubscriptionSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     sessionId: { type: String, required: true },
-    endpoint: { type: String, required: true, unique: true, maxlength: 1000 },
+    endpoint: { type: String, required: true, maxlength: 1000 },
     keys: {
       p256dh: { type: String, required: true, maxlength: 200 },
       auth: { type: String, required: true, maxlength: 100 }
@@ -20,5 +21,7 @@ const pushSubscriptionSchema = new mongoose.Schema(
 );
 
 pushSubscriptionSchema.index({ user: 1 });
+pushSubscriptionSchema.index({ orgId: 1, endpoint: 1 }, { unique: true });
 
+pushSubscriptionSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("PushSubscription", pushSubscriptionSchema);

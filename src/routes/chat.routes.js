@@ -1,4 +1,5 @@
 const express = require("express");
+const resumeTenant = require("../middlewares/tenantResume.middleware");
 const router = express.Router();
 
 const chatController = require("../controllers/chat.controller");
@@ -52,6 +53,26 @@ router.put("/keys/bundle", chatController.putKeyBundle);
 router.get("/keys/recovery", chatController.getRecoveryBundle);
 router.get("/keys/:userId", chatController.getPublicKey);
 
+// ── People (staff directory) ─────────────────────────────────────────────────
+// Who I can start a chat with: active staff of my organisation who have chat.
+// Never customers (they chat only in project groups admins set up) and never
+// email addresses. Customers can't reach this route (accessPolicy allow-list).
+router.get(
+  "/people",
+  asyncHandler(async (req, res) => {
+    const search = typeof req.query.search === "string" ? req.query.search.slice(0, 60) : "";
+    const cursor = typeof req.query.cursor === "string" ? req.query.cursor.slice(0, 200) : undefined;
+    const page = await require("../services/directory.service").searchStaff({
+      q: search,
+      module: "chat",
+      orgMask: req.orgModules,
+      excludeId: req.user._id,
+      cursor
+    });
+    res.status(200).json(new (require("../utils/ApiResponse"))(200, page));
+  })
+);
+
 // ── Conversation Routes ──────────────────────────────────────────────────────
 router.get("/conversations", chatController.getConversations);
 router.post("/conversations", chatController.createConversation);
@@ -75,7 +96,7 @@ router.post(
   requireMembership,
   messageLimiter,
   attachmentLimiter,
-  upload.single("file"),
+  resumeTenant(upload.single("file")),
   uploadChatAttachment
 );
 

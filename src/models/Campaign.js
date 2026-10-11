@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /**
  * An offer, campaign video or poster shown on the customer Home page.
@@ -62,4 +63,5 @@ campaignSchema.methods.state = function (now = new Date()) {
   return "live";
 };
 
+campaignSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("Campaign", campaignSchema);

@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /**
  * "Your designer replied" alert for a customer who hasn't seen a staff reply
@@ -25,4 +26,5 @@ offlineAlertSchema.index({ status: 1, dueAt: 1 });
 offlineAlertSchema.index({ user: 1, conversation: 1, externalSentAt: -1 });
 offlineAlertSchema.index({ createdAt: 1 }, { expireAfterSeconds: 30 * 24 * 3600 });
 
+offlineAlertSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("OfflineAlert", offlineAlertSchema);

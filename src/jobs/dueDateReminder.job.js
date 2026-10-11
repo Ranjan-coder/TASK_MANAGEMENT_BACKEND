@@ -36,65 +36,68 @@ const initDueDateReminder = async () => {
 
     const reminderWorker = new Worker(
       "dueDateReminderQueue",
-      async () => {
-        // Import lazily to avoid circular dependency issues at startup
-        const Task = require("../models/Task");
-        const Notification = require("../models/Notification");
-        const { addEmailJob } = require("./queue");
-        const { getIO } = require("../sockets");
-
-        const now = new Date();
-        const in24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-
-        const tasksDueSoon = await Task.find({
-          isArchived: false,
-          status: { $nin: ["completed", "cancelled"] },
-          dueDate: { $gte: now, $lte: in24h }
-        }).populate("assignedTo", "name email");
-
-        logger.info(`[DueDateReminder] Found ${tasksDueSoon.length} tasks due within 24h`);
-
-        const io = getIO();
-
-        for (const task of tasksDueSoon) {
-          for (const assignee of task.assignedTo) {
-            // Check if we already sent a reminder today (prevent duplicates)
-            const alreadyNotified = await Notification.findOne({
-              recipient: assignee._id,
-              relatedTask: task._id,
-              type: "due_date_reminder",
-              createdAt: { $gte: new Date(now.toDateString()) }
-            });
-
-            if (alreadyNotified) continue;
-
-            const notif = await Notification.create({
-              recipient: assignee._id,
-              type: "due_date_reminder",
-              title: "Task Due Soon",
-              message: `Task "${task.title}" is due within 24 hours.`,
-              relatedTask: task._id
-            });
-
-            if (io) {
-              io.to(`user:${assignee._id}`).emit("notification:new", notif);
-            }
-
-            await addEmailJob({
-              to: assignee.email,
-              subject: `Reminder: Task "${task.title}" is due soon`,
-              html: `
-                <p>Hi ${assignee.name},</p>
-                <p>This is a reminder that the task <strong>${task.title}</strong> is due within 24 hours.</p>
-                <p>Due date: <strong>${task.dueDate.toLocaleDateString()}</strong></p>
-                <p>Please log in to update its status.</p>
-              `
-            });
-          }
-        }
-      },
+      // Once per organisation, scoped to it
+      () => require("../utils/forEachOrg").forEachOrg("DueDateReminder", checkDueDates, { module: "tasks" }),
       { connection }
     );
+
+    async function checkDueDates() {
+      // Import lazily to avoid circular dependency issues at startup
+      const Task = require("../models/Task");
+      const Notification = require("../models/Notification");
+      const { addEmailJob } = require("./queue");
+      const { getIO } = require("../sockets");
+
+      const now = new Date();
+      const in24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+      const tasksDueSoon = await Task.find({
+        isArchived: false,
+        status: { $nin: ["completed", "cancelled"] },
+        dueDate: { $gte: now, $lte: in24h }
+      }).populate("assignedTo", "name email");
+
+      logger.info(`[DueDateReminder] Found ${tasksDueSoon.length} tasks due within 24h`);
+
+      const io = getIO();
+
+      for (const task of tasksDueSoon) {
+        for (const assignee of task.assignedTo) {
+          // Check if we already sent a reminder today (prevent duplicates)
+          const alreadyNotified = await Notification.findOne({
+            recipient: assignee._id,
+            relatedTask: task._id,
+            type: "due_date_reminder",
+            createdAt: { $gte: new Date(now.toDateString()) }
+          });
+
+          if (alreadyNotified) continue;
+
+          const notif = await Notification.create({
+            recipient: assignee._id,
+            type: "due_date_reminder",
+            title: "Task Due Soon",
+            message: `Task "${task.title}" is due within 24 hours.`,
+            relatedTask: task._id
+          });
+
+          if (io) {
+            io.to(`user:${assignee._id}`).emit("notification:new", notif);
+          }
+
+          await addEmailJob({
+            to: assignee.email,
+            subject: `Reminder: Task "${task.title}" is due soon`,
+            html: `
+              <p>Hi ${assignee.name},</p>
+              <p>This is a reminder that the task <strong>${task.title}</strong> is due within 24 hours.</p>
+              <p>Due date: <strong>${task.dueDate.toLocaleDateString()}</strong></p>
+              <p>Please log in to update its status.</p>
+            `
+          });
+        }
+      }
+    }
 
     reminderWorker.on("completed", () => {
       logger.info("[DueDateReminder] Check completed");

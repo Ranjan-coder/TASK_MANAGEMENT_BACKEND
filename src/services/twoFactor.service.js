@@ -27,7 +27,9 @@ const decryptSecret = (encryptedText) => {
 
 const generate2FASecret = async (email) => {
   const secret = authenticator.generateSecret();
-  const otpauth = authenticator.keyuri(email, "TaskManager", secret);
+  // The entry's name in the authenticator app: the product (or the organisation's brand)
+  const issuer = await require("./organisation.service").currentBrandName();
+  const otpauth = authenticator.keyuri(email, issuer, secret);
   const qrCodeUrl = await qrcode.toDataURL(otpauth);
 
   // Generate 8 backup recovery codes

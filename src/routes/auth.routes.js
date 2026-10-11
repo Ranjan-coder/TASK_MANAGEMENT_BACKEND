@@ -1,5 +1,7 @@
 const express = require("express");
 const router = express.Router();
+// Sign-in starts without an organisation (see middlewares/publicTenant)
+router.use(require("../middlewares/publicTenant.middleware"));
 const authController = require("../controllers/auth.controller");
 const authMiddleware = require("../middlewares/auth.middleware");
 const validate = require("../middlewares/validate.middleware");

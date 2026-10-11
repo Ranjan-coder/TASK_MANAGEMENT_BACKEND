@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /** A customer's 1–5 star rating of their lead designer on one project (editable). */
 const TAGS = ["responsive", "creative", "professional", "knowledgeable"];
@@ -19,5 +20,6 @@ const ratingSchema = new mongoose.Schema(
 ratingSchema.index({ customer: 1, designer: 1, conversation: 1 }, { unique: true });
 ratingSchema.index({ designer: 1, updatedAt: -1 });
 
+ratingSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("Rating", ratingSchema);
 module.exports.TAGS = TAGS;

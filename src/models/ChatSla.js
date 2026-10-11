@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /**
  * One waiting period in a project chat: from the first unanswered customer
@@ -47,4 +48,5 @@ chatSlaSchema.index({ open: 1, nextCheckAt: 1 });
 chatSlaSchema.index({ waitingSince: -1, designer: 1 });
 chatSlaSchema.index({ remindedUsers: 1, open: 1 });
 
+chatSlaSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("ChatSla", chatSlaSchema);

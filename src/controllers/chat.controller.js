@@ -28,7 +28,7 @@ const moderationService = require("../services/moderation.service");
 /** Project chats are managed only from Admin → Projects. */
 const assertNotProject = (conversation) => {
   if (conversation?.project) {
-    throw new ApiError(403, "This project chat is managed by Bonito admins.", [{ code: "PROJECT_MANAGED" }]);
+    throw new ApiError(403, "This project chat is managed by your admins.", [{ code: "PROJECT_MANAGED" }]);
   }
 };
 
@@ -235,6 +235,15 @@ const createConversation = asyncHandler(async (req, res) => {
   }
 
   await assertCustomerPlacementAllowed({ actor: req.user, userIds: memberIds, type });
+
+  // Every member must be an active account of this organisation: one scoped count
+  // (another organisation's id, or one that doesn't exist, is simply not found)
+  const uniqueMembers = [...new Set(memberIds.map(String))];
+  if (uniqueMembers.some((id) => !/^[a-f0-9]{24}$/i.test(id))) throw new ApiError(400, "memberIds must be a list of user ids");
+  const found = await User.countDocuments({ _id: { $in: uniqueMembers }, status: "active", deletedAt: null });
+  if (found !== uniqueMembers.length) {
+    throw new ApiError(400, "Some of these people can't be added to a chat.", [{ code: "MEMBER_NOT_FOUND" }]);
+  }
 
   let result;
 

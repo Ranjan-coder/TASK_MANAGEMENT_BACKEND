@@ -18,8 +18,17 @@ const startServer = async () => {
   // Initialize Socket.io
   initSockets(server);
 
+  // Cache invalidation from other servers (organisation status, entitlements)
+  require("./utils/cacheBus").start();
+
   // Reply timers for project chats (needs the database, not Redis)
   require("./jobs/slaMonitor.job").startSlaMonitor();
+
+  // The product owner's standard departments/designations: created once, and existing
+  // organisations' matching items linked to it (a no-op after the first start)
+  require("./services/orgTemplate.service")
+    .ensureTemplate()
+    .catch((err) => logger.error(`[OrgTemplate] Couldn't prepare the standard list: ${err.message}`));
 
   server.listen(config.port, () => {
     logger.info(`Server running in ${config.env} mode on port ${config.port}`);

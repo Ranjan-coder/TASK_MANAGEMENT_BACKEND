@@ -3,6 +3,8 @@ const ProjectFinance = require("../models/ProjectFinance");
 const User = require("../models/User");
 const ApiError = require("../utils/ApiError");
 const logger = require("../utils/logger");
+const { requireOrgId } = require("../utils/tenantContext");
+const { currentOrgName } = require("./organisation.service");
 const { nextSequence } = require("../models/Counter");
 const media = require("./media.service");
 const { getSlaSettings, getEscalationRecipients } = require("./settings.service");
@@ -83,7 +85,7 @@ const paymentDetails = async () => {
   const { settings } = await getSlaSettings();
   const p = settings.payments || {};
   return {
-    companyName: p.companyName || "Bonito Interiors",
+    companyName: p.companyName || (await currentOrgName("")),
     upiId: p.upiId || "",
     bankName: p.bankName || "",
     accountName: p.accountName || "",
@@ -153,7 +155,7 @@ const getReceipt = async ({ conversationId, milestoneId, viewer }) => {
   return {
     receiptNo: m.paid.receiptNo,
     issuedAt: m.paid.confirmedAt,
-    company: { name: p.companyName || "Bonito Interiors", address: p.companyAddress || "", gstin: p.gstin || "" },
+    company: { name: p.companyName || (await currentOrgName("")), address: p.companyAddress || "", gstin: p.gstin || "" },
     customerNames: customers.map((c) => c.name),
     projectName: conv.name,
     milestone: m.title,
@@ -303,7 +305,10 @@ const confirmPayment = async ({ conversationId, milestoneId, admin, method, refe
     message: `${rupees(amountPaise)} for "${m.title}" (${conv.name}). Receipt ${receiptNo} is in Payments.`
   });
   // A friend's first payment qualifies the referral
-  await require("./referrals.service").onFirstPayment(conv.project.customers, conv.project.customers).catch((err) => logger.warn(`Referral check failed: ${err.message}`));
+  // Referral rewards only where the organisation has the referrals module
+  if (await require("./organisation.service").orgHasModule(requireOrgId(), "referrals")) {
+    await require("./referrals.service").onFirstPayment(conv.project.customers, conv.project.customers).catch((err) => logger.warn(`Referral check failed: ${err.message}`));
+  }
   return { receiptNo, ...(await adminGet(conversationId)) };
 };
 

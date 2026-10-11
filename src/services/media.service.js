@@ -4,6 +4,8 @@ const config = require("../config/env");
 const ApiError = require("../utils/ApiError");
 const logger = require("../utils/logger");
 const { stripImageMetadata } = require("../utils/imageMetadata");
+const { requireOrgId, currentOrgId } = require("../utils/tenantContext");
+const { getCachedSlug } = require("./organisation.service");
 
 /**
  * Campaign / catalog media. Files are identified by their actual bytes (magic
@@ -15,7 +17,18 @@ const VIDEO_TYPES = ["video/mp4", "video/webm", "video/quicktime"];
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
 const MAX_VIDEO_SECONDS = 60;
-const FOLDERS = { campaign: "bonito/campaigns", catalog: "bonito/catalog" };
+const FOLDERS = { campaign: "campaigns", catalog: "catalog" };
+// Where the first organisation's media lived before tenancy (still valid for it only)
+const LEGACY_FOLDERS = { campaign: "bonito/campaigns", catalog: "bonito/catalog" };
+const LEGACY_SLUG = (process.env.TENANT_DEFAULT_SLUG || "bonito").toLowerCase();
+
+/**
+ * Every organisation's files live under their own folder, "org_<orgId>/<kind>"
+ * (module-access-plan.md, Phase 5). Records stay the real access control; the
+ * folder makes ownership visible and lets isOwnMedia refuse another
+ * organisation's files.
+ */
+const orgFolder = (kind) => `org_${requireOrgId()}/${kind}`;
 
 const sniff = async (buffer) => {
   const { fileTypeFromBuffer } = await import("file-type");
@@ -71,7 +84,7 @@ const uploadMedia = async (buffer, purpose) => {
   let result;
   try {
     result = await uploadBuffer(buffer, {
-      folder: FOLDERS[purpose],
+      folder: orgFolder(FOLDERS[purpose]),
       public_id: `${Date.now()}_${crypto.randomBytes(8).toString("hex")}`,
       resource_type: isVideo ? "video" : "image",
       overwrite: false
@@ -115,14 +128,19 @@ const destroyMedia = async (publicId, resourceType = "image") => {
 const isOwnMedia = (url, publicId, purpose) => {
   const cloud = config.cloudinary.cloudName;
   if (typeof url !== "string" || typeof publicId !== "string" || !cloud || !FOLDERS[purpose]) return false;
-  if (!publicId.startsWith(`${FOLDERS[purpose]}/`) || !/^[A-Za-z0-9_\-/]+$/.test(publicId) || publicId.includes("//") || publicId.includes("..")) return false;
+  const orgId = currentOrgId();
+  if (!orgId) return false;
+  // This organisation's folder only (the first organisation may also keep its older files)
+  const prefixes = [`org_${orgId}/${FOLDERS[purpose]}/`];
+  if (getCachedSlug(orgId) === LEGACY_SLUG) prefixes.push(`${LEGACY_FOLDERS[purpose]}/`);
+  if (!prefixes.some((p) => publicId.startsWith(p)) || !/^[A-Za-z0-9_\-/]+$/.test(publicId) || publicId.includes("//") || publicId.includes("..")) return false;
   // The URL must be exactly one this server builds for that file (no /fetch/ remote URLs, no other accounts)
   return [imageUrl(publicId), videoUrl(publicId), videoPosterUrl(publicId)].includes(url);
 };
 
 // ── Report evidence (screenshots) ─────────────────────────────────────────────
 const MAX_EVIDENCE_BYTES = 8 * 1024 * 1024;
-const EVIDENCE_FOLDER = "bonito/reports";
+const EVIDENCE_FOLDER = "reports";
 
 /**
  * Stores a report screenshot privately (not reachable by a public URL),
@@ -138,7 +156,7 @@ const uploadEvidenceImage = async (buffer) => {
   let result;
   try {
     result = await uploadBuffer(clean, {
-      folder: EVIDENCE_FOLDER,
+      folder: orgFolder(EVIDENCE_FOLDER),
       public_id: `${Date.now()}_${crypto.randomBytes(8).toString("hex")}`,
       resource_type: "image",
       type: "private",
@@ -180,7 +198,7 @@ const uploadInvoicePdf = async (buffer) => {
   if (buffer.length > MAX_PDF_BYTES) throw new ApiError(400, "Invoices must be 10 MB or smaller.");
   try {
     const result = await uploadBuffer(buffer, {
-      folder: "bonito/invoices",
+      folder: orgFolder("invoices"),
       public_id: `${Date.now()}_${crypto.randomBytes(8).toString("hex")}.pdf`,
       resource_type: "raw",
       type: "private",
@@ -207,6 +225,7 @@ const destroyInvoice = async (publicId) => {
 };
 
 module.exports = {
+  orgFolder,
   uploadInvoicePdf,
   invoiceUrl,
   destroyInvoice,
