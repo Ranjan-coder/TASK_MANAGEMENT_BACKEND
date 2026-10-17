@@ -40,7 +40,16 @@ const updateProjectSchema = z.object({
 const projectIdSchema = z.object({ params: z.object({ id }) });
 
 const listProjectsSchema = z.object({
-  query: z.object({ status: z.enum(["active", "on_hold", "completed"]).optional() }).passthrough()
+  query: z
+    .object({
+      status: z.enum(["active", "on_hold", "completed"]).optional(),
+      stage: z.enum(require("../config/projectStages").STAGE_KEYS).optional()
+    })
+    .passthrough()
 });
 
-module.exports = { createProjectSchema, updateProjectSchema, projectIdSchema, listProjectsSchema };
+const stageCountsSchema = z.object({
+  query: z.object({ status: z.enum(["active", "on_hold", "completed"]).optional() }).strict()
+});
+
+module.exports = { createProjectSchema, updateProjectSchema, projectIdSchema, listProjectsSchema, stageCountsSchema };

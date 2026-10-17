@@ -230,9 +230,11 @@ const updateProject = async (id, { actor, name, status, customerIds, leadDesigne
 // ── Read ──────────────────────────────────────────────────────────────────────
 
 // The list screen never needs the chat key rings (they grow with every rekey and member)
-const listProjects = async ({ status } = {}) => {
+const listProjects = async ({ status, stage } = {}) => {
   const filter = { project: { $exists: true } };
   if (status) filter["project.status"] = status;
+  // Older projects have no stage stored and count as the first stage
+  if (stage) filter["project.stage"] = stage === "consultation" ? { $in: [stage, null] } : stage;
   return populateProject(Conversation.find(filter).select("-groupKeyring -groupKeys").sort({ lastActivityAt: -1 }).limit(500));
 };
 

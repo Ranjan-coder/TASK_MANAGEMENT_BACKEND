@@ -14,15 +14,9 @@ const { PROJECT_STAGES } = Conversation;
  * approvals (R4) and quick-reply templates (R5).
  */
 
-const STAGE_LABELS = {
-  consultation: "Consultation",
-  site_measurement: "Site measurement",
-  design: "Design",
-  quotation: "Quotation",
-  production: "Production",
-  installation: "Installation",
-  handover: "Handover"
-};
+const stages = require("../config/projectStages");
+
+const STAGE_LABELS = stages.LABELS;
 const ADMIN_ROLES = [ROLES.ADMIN, ROLES.SUPERADMIN];
 const STAFF_ROLES = [ROLES.USER, ROLES.ADMIN, ROLES.SUPERADMIN];
 const idStr = (v) => (v ? String(v._id || v) : null);
@@ -67,39 +61,79 @@ const loadProject = async (conversationId) => {
 // ── R1: status timeline ──────────────────────────────────────────────────────
 
 const timelineView = (project) => ({
-  stage: project.stage || "consultation",
-  stageHistory: (project.stageHistory || []).map((h) => ({ stage: h.stage, at: h.at, note: h.note || "" })),
+  stage: stages.currentStage(project),
+  stageHistory: (project.stageHistory || []).map((h) => ({ stage: h.stage, from: h.from || null, kind: h.kind || null, at: h.at, note: h.note || "" })),
   expectedHandover: project.expectedHandover || null
 });
 
-/** Lead/backup designer, project manager or an admin moves the project to a stage. */
-const setStage = async ({ conversationId, actor, stage, note = "", expectedHandover }) => {
+/** Stored stage filter: older projects have no stage field and count as the first stage. */
+const stageFilter = (stage) => (stage === stages.FIRST ? { $in: [stage, null] } : stage);
+
+/**
+ * Moves a project's stage (rules in config/projectStages.js), or saves a note /
+ * expected handover date without moving.
+ *
+ * `from` is the stage the person was looking at. The write is one conditional
+ * update on that stage, so two people pressing "next" at once can't both move it
+ * (the second gets 409 STAGE_CHANGED and the current stage).
+ */
+const setStage = async ({ conversationId, actor, stage, from, note = "", expectedHandover }) => {
   const conv = await loadProject(conversationId);
-  if (!ADMIN_ROLES.includes(actor.role) && !(isTeamLead(conv, actor._id) && isMember(conv, actor._id))) {
+  const isAdmin = ADMIN_ROLES.includes(actor.role);
+  if (!isAdmin && !(isTeamLead(conv, actor._id) && isMember(conv, actor._id))) {
     throw new ApiError(403, "Only the project's designers, manager or an admin can update the stage");
   }
-  if (!PROJECT_STAGES.includes(stage)) throw new ApiError(400, "Unknown stage");
-  const changed = stage !== (conv.project.stage || "consultation");
-  if (!changed && expectedHandover === undefined && !note) throw new ApiError(400, "Nothing to update");
-
-  if (changed) {
-    conv.project.stage = stage;
-    conv.project.stageHistory.push({ stage, at: new Date(), by: actor._id, note });
-  } else if (note) {
-    conv.project.stageHistory.push({ stage, at: new Date(), by: actor._id, note });
+  const current = stages.currentStage(conv.project);
+  const expected = from ?? current;
+  if (expected !== current) {
+    throw new ApiError(409, `Someone just moved this project to ${STAGE_LABELS[current]}. Check and try again.`, [{ code: "STAGE_CHANGED", stage: current }]);
   }
-  if (expectedHandover !== undefined) conv.project.expectedHandover = expectedHandover;
-  conv.markModified("project");
-  await conv.save();
 
-  if (changed) {
+  let plan;
+  try {
+    plan = stages.planTransition({ from: current, to: stage, status: conv.project.status, isAdmin, note });
+  } catch (err) {
+    if (err instanceof stages.StageRuleError) throw new ApiError(err.status, err.message, [{ code: err.code }]);
+    throw err;
+  }
+  const moved = plan.kind !== "same";
+  if (!moved && expectedHandover === undefined && !note) throw new ApiError(400, "Nothing to update");
+
+  const $set = {};
+  if (moved) $set["project.stage"] = stage;
+  if (expectedHandover !== undefined) $set["project.expectedHandover"] = expectedHandover;
+  const entry = moved || note ? { stage, from: moved ? current : null, kind: moved ? plan.kind : "note", at: new Date(), by: actor._id, note } : null;
+
+  // Atomic: only applies if the stage is still the one this person saw
+  const updated = await Conversation.findOneAndUpdate(
+    { _id: conv._id, "project.stage": stageFilter(current) },
+    { ...(Object.keys($set).length && { $set }), ...(entry && { $push: { "project.stageHistory": entry } }) },
+    { new: true, projection: { name: 1, project: 1 } }
+  );
+  if (!updated) {
+    const now = stages.currentStage((await loadProject(conversationId)).project);
+    throw new ApiError(409, `Someone just moved this project to ${STAGE_LABELS[now]}. Check and try again.`, [{ code: "STAGE_CHANGED", stage: now }]);
+  }
+
+  if (moved) {
     const label = STAGE_LABELS[stage];
+    const verb = plan.kind === "back" ? "moved back to" : "is now at";
     await postNotice(conv._id, actor._id, `📍 Project stage: ${label}${note ? ` — ${note}` : ""}`);
-    await notify(conv.project.customers, { title: `Your project is now at: ${label}`, message: `"${conv.name}"${note ? ` — ${note}` : ""}`, relatedConversation: conv._id });
+    await notify(updated.project.customers, { title: `Your project ${verb}: ${label}`, message: `"${updated.name}"${note ? ` — ${note}` : ""}`, relatedConversation: conv._id });
   }
-  const view = { conversationId: String(conv._id), ...timelineView(conv.project) };
+  const view = { conversationId: String(conv._id), status: updated.project.status, ...timelineView(updated.project), move: plan.kind, from: current };
   emit((io) => io.to(`conv:${conv._id}`).emit("chat:project:stage", view));
   return view;
+};
+
+/** How many projects are at each stage (one grouped query), for the admin pipeline. */
+const stageCounts = async ({ status } = {}) => {
+  const rows = await Conversation.aggregate([
+    { $match: { project: { $exists: true, $ne: null }, ...(status && { "project.status": status }) } },
+    { $group: { _id: { $ifNull: ["$project.stage", stages.FIRST] }, n: { $sum: 1 } } }
+  ]);
+  const byStage = new Map(rows.map((r) => [r._id, r.n]));
+  return stages.STAGES.map((s) => ({ stage: s.key, label: s.label, count: byStage.get(s.key) || 0 }));
 };
 
 /** The customer's projects with their timelines (for Home). */
@@ -258,6 +292,7 @@ const deleteQuickReply = async (user, id) => {
 module.exports = {
   STAGE_LABELS,
   setStage,
+  stageCounts,
   listMyProjects,
   timelineView,
   requestApproval,

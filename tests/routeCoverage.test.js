@@ -182,6 +182,7 @@ test("leadership reaches only read-only oversight routes (never a change outside
       "GET /api/v1/admin/payments/:projectId",
       "GET /api/v1/admin/projects/",
       "GET /api/v1/admin/projects/:id",
+      "GET /api/v1/admin/projects/stages",
       "GET /api/v1/admin/sla/metrics"
     ].sort()
   );

@@ -166,6 +166,24 @@ describe("tenant plugin: queries", () => {
     await expect(tenant.runInOrg(orgA._id, () => foreign.save())).rejects.toThrow(/another organisation/);
   });
 
+  test("a document loaded without orgId (field selection) can still be saved in its own organisation", async () => {
+    // Regression: publishing the first chat key loads the user with .select(...) and saves
+    const partial = await tenant.runInOrg(orgB._id, () => Task.findById(taskB._id).select("title"));
+    partial.title = "Renamed in B";
+    await tenant.runInOrg(orgB._id, () => partial.save());
+    const raw = await Task.collection.findOne({ _id: taskB._id });
+    expect(raw.title).toBe("Renamed in B");
+    expect(String(raw.orgId)).toBe(String(orgB._id));
+  });
+
+  test("…but saving such a document from another organisation still changes nothing", async () => {
+    const partial = await tenant.runAsSystem(() => Task.findById(taskB._id).select("title"));
+    partial.title = "hacked";
+    await expect(tenant.runInOrg(orgA._id, () => partial.save())).rejects.toThrow(/No document found/);
+    const raw = await Task.collection.findOne({ _id: taskB._id });
+    expect(raw.title).not.toBe("hacked");
+  });
+
   test("no context fails closed", async () => {
     await expect(Task.find()).rejects.toThrow(tenant.TenantContextError);
     await expect(Task.create({ title: "x", assignedBy: a1._id, dueDate: new Date() })).rejects.toThrow(tenant.TenantContextError);

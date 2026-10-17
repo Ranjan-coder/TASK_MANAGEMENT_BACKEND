@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 const tenantPlugin = require("./plugins/tenant.plugin");
 
-const PROJECT_STAGES = ["consultation", "site_measurement", "design", "quotation", "production", "installation", "handover"];
+const { STAGE_KEYS: PROJECT_STAGES } = require("../config/projectStages");
 
 const memberSchema = new mongoose.Schema(
   {
@@ -78,6 +78,9 @@ const conversationSchema = new mongoose.Schema(
           type: [
             {
               stage: { type: String, enum: PROJECT_STAGES },
+              // Where it came from and how (next / back / jump; "note" = note only)
+              from: { type: String, enum: [...PROJECT_STAGES, null], default: null },
+              kind: { type: String, enum: ["next", "back", "jump", "note", null], default: null },
               at: { type: Date, default: Date.now },
               by: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
               note: { type: String, maxlength: 300, default: "" },

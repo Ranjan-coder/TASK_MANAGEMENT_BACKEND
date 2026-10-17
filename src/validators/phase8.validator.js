@@ -14,6 +14,8 @@ const stageSchema = z.object({
   body: z
     .object({
       stage: z.enum(PROJECT_STAGES),
+      // The stage the person was looking at (stops two people moving it at once)
+      from: z.enum(PROJECT_STAGES).optional(),
       note: text(0, 300).optional().default(""),
       expectedHandover: z.coerce.date().nullable().optional()
     })

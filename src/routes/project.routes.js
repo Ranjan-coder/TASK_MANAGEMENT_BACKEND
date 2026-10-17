@@ -16,6 +16,8 @@ const view = authorize(ADMIN, "projects.view");
 const adminOnly = rbacMiddleware(...ADMIN);
 
 router.get("/", view, validate(v.listProjectsSchema), controller.listProjects);
+// Pipeline: how many projects are at each stage (before "/:id" so "stages" isn't read as an id)
+router.get("/stages", view, validate(v.stageCountsSchema), controller.stageCounts);
 router.post("/", adminOnly, validate(v.createProjectSchema), controller.createProject);
 router.get("/:id", view, validate(v.projectIdSchema), controller.getProject);
 router.put("/:id", adminOnly, validate(v.updateProjectSchema), controller.updateProject);

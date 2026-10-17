@@ -83,6 +83,15 @@ function tenantPlugin(schema, { required = true } = {}) {
       this.orgId = org;
       return;
     }
+
+    // Loaded with a projection that left orgId out (e.g. .select("publicKey keyVersion")):
+    // there's nothing to compare, so let the database check it instead. $where is
+    // added to the save's update filter, so the write only lands if the document
+    // really belongs to this organisation (otherwise DocumentNotFoundError).
+    if (!this.isNew && !this.isSelected("orgId")) {
+      this.$where = { ...(this.$where || {}), ...match(org) };
+      return;
+    }
     if (!same(this.orgId, org)) throw mismatch();
   }
   schema.pre("validate", stampOrg);
