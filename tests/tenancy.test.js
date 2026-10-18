@@ -294,6 +294,49 @@ describe("HTTP: sign-in and isolation", () => {
     expect(me.body.data.organisation).toMatchObject({ slug: "alpha", name: "Alpha Interiors" });
   });
 
+  // Every Set-Cookie that clears a cookie (empty value or a past expiry)
+  const cleared = (res) =>
+    (res.headers["set-cookie"] || [])
+      .filter((c) => /^[^=]+=;/.test(c) || /Expires=Thu, 01 Jan 1970/i.test(c))
+      .map((c) => c.split("=")[0])
+      .sort();
+
+  test("sign-out clears the cookies and ends this device's session", async () => {
+    const res = await login("solo@example.com", "alpha");
+    const cookie = cookiesOf(res);
+    const out = await request(app).post("/api/v1/auth/logout").set("Cookie", cookie);
+    expect(out.status).toBe(200);
+    expect(cleared(out)).toEqual(["accessToken", "refreshToken", "role"]);
+    const me = await request(app).get("/api/v1/auth/me").set("Cookie", cookie); // the old cookies no longer work
+    expect(me.status).toBe(401);
+  });
+
+  test("sign-out still works (and clears the cookies) when the account was deleted", async () => {
+    const gone = await makeUser(orgA, { email: "gone@example.com", role: "user" });
+    const cookie = cookiesOf(await login("gone@example.com", "alpha"));
+    await User.collection.deleteOne({ _id: gone._id });
+    const out = await request(app).post("/api/v1/auth/logout").set("Cookie", cookie);
+    expect(out.status).toBe(200); // used to be 401 with the cookies left in place
+    expect(cleared(out)).toEqual(["accessToken", "refreshToken", "role"]);
+  });
+
+  test("a refused refresh clears the cookies (no bouncing between login and dashboard)", async () => {
+    const gone = await makeUser(orgA, { email: "gone2@example.com", role: "user" });
+    const cookie = cookiesOf(await login("gone2@example.com", "alpha"));
+    await User.collection.deleteOne({ _id: gone._id });
+    const r = await request(app).post("/api/v1/auth/refresh").set("Cookie", cookie);
+    expect(r.status).toBe(401);
+    expect(cleared(r)).toEqual(["accessToken", "refreshToken", "role"]);
+  });
+
+  test("sign-out with no or forged cookies just clears them", async () => {
+    const none = await request(app).post("/api/v1/auth/logout");
+    expect(none.status).toBe(200);
+    const forged = await request(app).post("/api/v1/auth/logout").set("Cookie", "accessToken=not.a.jwt; refreshToken=forged");
+    expect(forged.status).toBe(200);
+    expect(cleared(forged)).toEqual(["accessToken", "refreshToken", "role"]);
+  });
+
   test("known and unknown accounts answer alike in every organisation, and no answer repeats across codes", async () => {
     const salts = new Set();
     for (const identifier of ["solo@example.com", "nobody@example.com", "same@example.com"]) {

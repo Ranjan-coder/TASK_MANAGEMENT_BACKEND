@@ -3,6 +3,10 @@ const tenantPlugin = require("./plugins/tenant.plugin");
 
 const { STAGE_KEYS: PROJECT_STAGES } = require("../config/projectStages");
 
+// Stage keys come from each company's workflow (modules/workflows/engine/tree.js KEY_RE)
+const STAGE_KEY_RE = /^[a-z][a-z0-9_]{1,39}$/;
+const HISTORY_KINDS = ["next", "back", "jump", "note", "activate", "deactivate", "tick", "untick", "extra", "extra_done", "checklist", "migrate"];
+
 const memberSchema = new mongoose.Schema(
   {
     user: {
@@ -72,15 +76,59 @@ const conversationSchema = new mongoose.Schema(
         manager: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
         createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
         createdAt: { type: Date, default: Date.now },
-        // Status timeline shown to the customer (R1)
-        stage: { type: String, enum: PROJECT_STAGES, default: "consultation" },
+        // Status timeline shown to the customer (R1). `stage` is the current top-level
+        // stage key of the company's workflow (project-workflow-plan.md); kept for
+        // filters and the pipeline. Older projects without `flow` use the Basic stages.
+        stage: { type: String, match: STAGE_KEY_RE, default: "consultation" },
+        // Where the project is in its workflow version (modules/workflows)
+        flow: {
+          type: {
+            versionId: { type: mongoose.Schema.Types.ObjectId, ref: "WorkflowVersion", required: true },
+            version: { type: Number, required: true },
+            stepKey: { type: String, required: true, maxlength: 81 },
+            // Any-order stages: ticked sub-stages, one bit each ({ stageKey: bitmask }).
+            // Mixed (not Map) so the atomic $bit update isn't re-cast by Mongoose;
+            // keys are validated stage keys (engine/tree.js KEY_RE).
+            ticks: { type: mongoose.Schema.Types.Mixed, default: {} },
+            // Optional sub-stages switched on for this project (W5): "stage/sub"
+            activated: {
+              type: [{ key: { type: String, maxlength: 81 }, at: Date, by: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, note: { type: String, maxlength: 300 }, _id: false }],
+              default: []
+            },
+            // "Additional work" items (C2), each blocks leaving its stage until done
+            extras: {
+              type: [
+                {
+                  stageKey: { type: String, maxlength: 40 },
+                  note: { type: String, maxlength: 300 },
+                  done: { type: Boolean, default: false },
+                  at: Date,
+                  by: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+                  doneAt: { type: Date, default: null },
+                  doneBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null }
+                }
+              ],
+              default: []
+            },
+            // Gate checklists done (E3): "stage:item"
+            checks: { type: [{ type: String, maxlength: 81 }], default: [] },
+            enteredAt: { type: Date, default: Date.now }, // entered the current step
+            stageEnteredAt: { type: Date, default: Date.now }, // entered the current stage
+            dueAt: { type: Date, default: null }, // E1: when the current stage should be done
+            overdueNotifiedAt: { type: Date, default: null } // E1: one alert per overdue stage
+          },
+          default: undefined,
+          _id: false
+        },
         stageHistory: {
           type: [
             {
-              stage: { type: String, enum: PROJECT_STAGES },
-              // Where it came from and how (next / back / jump; "note" = note only)
-              from: { type: String, enum: [...PROJECT_STAGES, null], default: null },
-              kind: { type: String, enum: ["next", "back", "jump", "note", null], default: null },
+              stage: { type: String, maxlength: 40 },
+              step: { type: String, maxlength: 81, default: null },
+              version: { type: Number, default: null },
+              // Where it came from and how
+              from: { type: String, maxlength: 81, default: null },
+              kind: { type: String, enum: [...HISTORY_KINDS, null], default: null },
               at: { type: Date, default: Date.now },
               by: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
               note: { type: String, maxlength: 300, default: "" },
@@ -164,6 +212,13 @@ conversationSchema.index({ "project.status": 1, lastActivityAt: -1 }, { sparse: 
 conversationSchema.index({ isArchived: 1, "members.user": 1 });
 // Customer Home, payments, monitoring and privacy all look projects up by customer
 conversationSchema.index({ "project.customers": 1, lastActivityAt: -1 }, { sparse: true });
+// E1: overdue stages, found with one indexed range query (only projects with a due date are indexed)
+conversationSchema.index(
+  { orgId: 1, "project.flow.dueAt": 1 },
+  { partialFilterExpression: { "project.flow.dueAt": { $type: "date" } } }
+);
+// Pipeline and stage filters
+conversationSchema.index({ orgId: 1, "project.stage": 1 }, { partialFilterExpression: { "project.stage": { $type: "string" } } });
 
 conversationSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 const Conversation = mongoose.model("Conversation", conversationSchema);

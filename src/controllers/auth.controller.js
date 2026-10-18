@@ -269,7 +269,21 @@ const enable2FA = asyncHandler(async (req, res) => {
   res.status(200).json(new ApiResponse(200, null, "2FA successfully enabled"));
 });
 
+/**
+ * A refused refresh means this browser's session is over: clear its cookies so the
+ * app (and the page guard, which only sees that cookies exist) treat it as signed
+ * out, instead of looping between /login and the dashboard.
+ */
 const refreshToken = asyncHandler(async (req, res) => {
+  try {
+    await refreshSession(req, res);
+  } catch (err) {
+    if (err.statusCode === 401 || err.statusCode === 403) authService.clearTokenCookies(res);
+    throw err;
+  }
+});
+
+const refreshSession = async (req, res) => {
   const incomingRefreshToken = req.cookies.refreshToken || req.body.refreshToken;
 
   if (!incomingRefreshToken) {
@@ -301,14 +315,52 @@ const refreshToken = asyncHandler(async (req, res) => {
     throw new ApiError(401, "Session revoked");
   }
 
-  const { accessToken } = await authService.rotateSession(res, user, decoded, incomingRefreshToken);
+  await authService.rotateSession(res, user, decoded, incomingRefreshToken);
   res.status(200).json(new ApiResponse(200, null, "Token refreshed successfully"));
-});
+};
 
+/**
+ * The session this browser's cookies point at: { userId, sid }, or null. The token's
+ * signature must check out; its expiry doesn't matter (signing out an expired
+ * session is still signing out). Step tokens (2FA / phone check) are not sessions.
+ */
+const sessionFromCookies = (req) => {
+  const tries = [
+    [req.cookies?.accessToken, config.jwt.accessSecret],
+    [req.cookies?.refreshToken, config.jwt.refreshSecret]
+  ];
+  for (const [token, secret] of tries) {
+    if (!token) continue;
+    try {
+      const d = jwt.verify(token, secret, { ignoreExpiration: true });
+      if (d?.userId && d.sid && !d.stage) return { userId: d.userId, sid: d.sid };
+    } catch {
+      /* not genuine: try the other cookie */
+    }
+  }
+  return null;
+};
+
+/**
+ * Signs this device out, whatever state the session is in (expired, revoked,
+ * account deleted). The cookies are ALWAYS cleared: before, a dead session made
+ * this endpoint answer 401 without clearing them, so the browser kept looking
+ * signed in and bounced between /login and the dashboard with no way out.
+ * When the token is genuine and the account exists, its session is ended too.
+ */
 const logout = asyncHandler(async (req, res) => {
-  if (req.user && req.sessionId) {
-    await User.updateOne({ _id: req.user._id }, { $pull: { currentSessions: { sessionId: req.sessionId } } });
-    disconnectSessions(req.user._id, [req.sessionId]).catch(() => {});
+  const session = sessionFromCookies(req);
+  if (session) {
+    try {
+      const user = await findUserById(session.userId);
+      if (user) {
+        enterUserOrg(user);
+        await User.updateOne({ _id: user._id }, { $pull: { currentSessions: { sessionId: session.sid } } });
+        disconnectSessions(user._id, [session.sid]).catch(() => {});
+      }
+    } catch (err) {
+      require("../utils/logger").warn(`Sign-out cleanup skipped: ${err.message}`); // still clear the cookies
+    }
   }
 
   authService.clearTokenCookies(res);

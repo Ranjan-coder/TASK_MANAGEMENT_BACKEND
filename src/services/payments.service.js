@@ -220,8 +220,18 @@ const adminList = async ({ filter }) => {
 
 const adminGet = async (conversationId) => {
   const conv = await loadProject(conversationId);
-  const f = await ProjectFinance.findOne({ conversation: conversationId }).populate("milestones.paid.confirmedBy", "name").lean();
-  return { projectId: conv._id, projectName: conv.name, finance: f ? { ...f, summary: summarise(f) } : null };
+  const [f, flowConv] = await Promise.all([
+    ProjectFinance.findOne({ conversation: conversationId }).populate("milestones.paid.confirmedBy", "name").lean(),
+    Conversation.findById(conversationId).select("project.flow project.stage").lean()
+  ]);
+  // The project's workflow stages, so a payment line can fall due at one (E4)
+  const c = await require("../modules/workflows/workflow.service").compiledForProject(flowConv?.project);
+  return {
+    projectId: conv._id,
+    projectName: conv.name,
+    finance: f ? { ...f, summary: summarise(f) } : null,
+    stages: c.stages.map((s) => ({ key: s.key, name: s.name, current: s.key === flowConv?.project?.stage }))
+  };
 };
 
 /**
@@ -245,9 +255,17 @@ const saveSchedule = async ({ conversationId, admin, contractValuePaise, gstRate
   const total = milestones.reduce((a, m) => a + m.amountPaise, 0);
   if (total > contractValuePaise) throw new ApiError(400, `The milestones add up to ${rupees(total)}, more than the contract value ${rupees(contractValuePaise)}`);
 
+  // A line linked to a stage must name a stage of this project's workflow (E4)
+  if (milestones.some((x) => x.stageKey)) {
+    const conv = await Conversation.findById(conversationId).select("project.flow project.stage").lean();
+    const c = await require("../modules/workflows/workflow.service").compiledForProject(conv?.project);
+    for (const x of milestones) if (x.stageKey && !c.stageIndex.has(x.stageKey)) throw new ApiError(400, `"${x.title}" is linked to a stage this project doesn't have`);
+  }
+
   const next = milestones.map((x) => {
     const old = x._id ? existing.get(x._id) : null;
     if (old) {
+      if (x.stageKey !== undefined) old.stageKey = x.stageKey || null;
       old.title = x.title;
       old.amountPaise = x.amountPaise;
       if (+new Date(old.dueDate || 0) !== +new Date(x.dueDate || 0)) {
@@ -257,7 +275,7 @@ const saveSchedule = async ({ conversationId, admin, contractValuePaise, gstRate
       }
       return old;
     }
-    return { title: x.title, amountPaise: x.amountPaise, dueDate: x.dueDate || null };
+    return { title: x.title, amountPaise: x.amountPaise, dueDate: x.dueDate || null, stageKey: x.stageKey || null };
   });
 
   const removed = [...existing.values()].filter((m) => !milestones.some((x) => x._id === String(m._id)));

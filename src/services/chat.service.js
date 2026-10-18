@@ -4,6 +4,7 @@ const User = require("../models/User");
 const ApiError = require("../utils/ApiError");
 const redisClient = require("../config/redis");
 const mongoose = require("mongoose");
+const { withSender } = require("../utils/presentPeople");
 
 // ── Conversation helpers ────────────────────────────────────────────────────
 
@@ -115,7 +116,8 @@ const getUserConversations = async (userId) => {
 
   return conversations.map((conv) => ({
     ...conv,
-    members: conv.members.map((m) => ({ ...m, isOnline: !!m.user && online.has(m.user._id.toString()) })),
+    // Members whose account is gone are left out (populate returns null for them)
+    members: conv.members.filter((m) => m.user).map((m) => ({ ...m, isOnline: online.has(m.user._id.toString()) })),
     unreadCount: unreadBy.get(conv._id.toString()) || 0
   }));
 };
@@ -170,7 +172,9 @@ const fetchDescPage = async (query, limit) => {
   if (hasMore) docs.pop();
   docs.reverse(); // oldest -> newest, the order the client renders in
 
-  return { items: docs, hasMore, nextCursor: hasMore && docs.length > 0 ? docs[0]._id : null };
+  // Messages from an account that's gone keep showing, as "Deleted user"
+  const items = docs.map(withSender);
+  return { items, hasMore, nextCursor: hasMore && items.length > 0 ? items[0]._id : null };
 };
 
 /**

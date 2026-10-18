@@ -9,6 +9,7 @@ const groupKeys = require("../services/groupKeys.service");
 const { stampFranking } = require("../utils/franking");
 const mongoose = require("mongoose");
 const logger = require("../utils/logger");
+const { withoutMissingPeople } = require("../utils/presentPeople");
 
 const isObjectId = (v) => typeof v === "string" && mongoose.isValidObjectId(v) && /^[a-f0-9]{24}$/i.test(v);
 // One emoji (with skin tone / ZWJ sequences / flags), nothing else
@@ -264,7 +265,7 @@ const createConversation = asyncHandler(async (req, res) => {
     };
   }
 
-  const populated = await result.conversation.populate("members.user", "name avatarUrl publicKey keyVersion");
+  const populated = withoutMissingPeople(await result.conversation.populate("members.user", "name avatarUrl publicKey keyVersion"));
 
   const statusCode = result.created ? 201 : 200;
   res.status(statusCode).json(
@@ -284,7 +285,7 @@ const getConversation = asyncHandler(async (req, res) => {
 
   if (!conv) throw new ApiError(404, "Conversation not found");
 
-  res.status(200).json(new ApiResponse(200, conv, "Conversation retrieved"));
+  res.status(200).json(new ApiResponse(200, withoutMissingPeople(conv), "Conversation retrieved"));
 });
 
 /**

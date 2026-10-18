@@ -8,8 +8,18 @@ const fs = require("fs");
 const path = require("path");
 const mongoose = require("mongoose");
 
-// TemplateDepartment / TemplateDesignation: the product owner's standard lists (no organisation data)
-const GLOBAL_MODELS = new Set(["Organisation", "OtpChallenge", "Counter", "UsedStepToken", "TemplateDepartment", "TemplateDesignation"]);
+// TemplateDepartment / TemplateDesignation / WorkflowTemplate(Version): the product owner's
+// standard lists and workflows (no organisation data)
+const GLOBAL_MODELS = new Set([
+  "Organisation",
+  "OtpChallenge",
+  "Counter",
+  "UsedStepToken",
+  "TemplateDepartment",
+  "TemplateDesignation",
+  "WorkflowTemplate",
+  "WorkflowTemplateVersion"
+]);
 
 const loadModels = (dir) => {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {

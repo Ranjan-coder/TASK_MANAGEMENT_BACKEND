@@ -3,6 +3,7 @@ const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
 const User = require("../models/User");
 const ApiError = require("../utils/ApiError");
+const { withoutMissingPeople } = require("../utils/presentPeople");
 const { currentOrgName } = require("./organisation.service");
 const logger = require("../utils/logger");
 const { ROLES } = require("../config/roles");
@@ -110,6 +111,12 @@ const createProject = async ({ actor, name, customerIds, leadDesignerId, backupD
   // rekeyRequested makes the team's first staff member replace it on open.
   const groupKeyring = buildInitialKeyring({ keys: encryptedGroupKeys, creatorId: actor._id, memberIdList: memberIds });
 
+  // The project follows the company's current workflow version from its first step (W6)
+  const wf = await require("../modules/workflows/workflow.service").currentCompiled();
+  const firstStage = wf.stages[0];
+  const now = new Date();
+  const firstDue = firstStage.durationDays ? new Date(now.getTime() + firstStage.durationDays * 24 * 60 * 60 * 1000) : null;
+
   const conversation = await Conversation.create({
     type: "group",
     name: name.trim(),
@@ -123,7 +130,16 @@ const createProject = async ({ actor, name, customerIds, leadDesignerId, backupD
       leadDesigner: leadDesignerId,
       backupDesigner: backupDesignerId || null,
       manager: managerId || null,
-      createdBy: actor._id
+      createdBy: actor._id,
+      stage: firstStage.key,
+      flow: {
+        versionId: wf.versionId,
+        version: wf.version,
+        stepKey: wf.firstStepKey,
+        enteredAt: now,
+        stageEnteredAt: now,
+        dueAt: firstDue
+      }
     }
   });
 
@@ -235,13 +251,26 @@ const listProjects = async ({ status, stage } = {}) => {
   if (status) filter["project.status"] = status;
   // Older projects have no stage stored and count as the first stage
   if (stage) filter["project.stage"] = stage === "consultation" ? { $in: [stage, null] } : stage;
-  return populateProject(Conversation.find(filter).select("-groupKeyring -groupKeys").sort({ lastActivityAt: -1 }).limit(500));
+  const list = await populateProject(Conversation.find(filter).select("-groupKeyring -groupKeys").sort({ lastActivityAt: -1 }).limit(500));
+  // Each project's workflow view, so the list draws every card without a request per
+  // project. Versions come from the in-memory cache (few distinct ones), so this is
+  // O(projects) work in memory, no extra queries.
+  const workflows = require("../modules/workflows/workflow.service");
+  const nav = require("../modules/workflows/engine/navigate");
+  const { stateOf } = require("../modules/workflows/projectFlow.service");
+  return Promise.all(
+    list.map(async (doc) => {
+      const json = withoutMissingPeople(doc); // people whose account is gone are left out
+      const c = await workflows.compiledForProject(json.project);
+      return { ...json, flowView: { version: c.version, ...nav.staffView(c, stateOf(json.project, c)) } };
+    })
+  );
 };
 
 const getProject = async (id) => {
   const project = await populateProject(Conversation.findOne({ _id: id, project: { $exists: true } }));
   if (!project) throw new ApiError(404, "Project not found");
-  return project;
+  return withoutMissingPeople(project);
 };
 
 module.exports = { createProject, updateProject, listProjects, getProject, ROLE_LABELS, PROJECT_STAFF_ROLES };

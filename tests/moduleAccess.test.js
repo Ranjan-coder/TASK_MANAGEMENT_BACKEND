@@ -33,7 +33,8 @@ describe("who holds what (pure)", () => {
     expect(access.userModuleMask({ role: "user" })).toBe(base);
     // Customers: everything except staff-only modules, unless the organisation opened them
     expect(access.userModuleMask({ role: "customer" })).toBe(modules.ALL_MASK & ~modules.STAFF_ONLY_MASK);
-    expect(access.userModuleMask({ role: "customer" }, modules.BIT.planner)).toBe(modules.ALL_MASK);
+    // Opening the planner to customers adds only the planner (other staff-only modules stay staff-only)
+    expect(access.userModuleMask({ role: "customer" }, modules.BIT.planner)).toBe(modules.ALL_MASK & ~(modules.STAFF_ONLY_MASK & ~modules.BIT.planner));
     expect(access.userModuleMask({ role: "platform_owner" })).toBe(0);
   });
 

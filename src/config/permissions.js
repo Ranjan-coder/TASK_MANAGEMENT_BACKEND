@@ -51,13 +51,13 @@ const PERMISSIONS = Object.freeze({
     bit: 4,
     module: "performance",
     label: "View business overview, designer performance and reply times",
-    rules: [rule("GET", "/admin/monitoring/overview"), rule("GET", "/admin/monitoring/designers"), rule("GET", "/admin/sla/metrics")]
+    rules: [rule("GET", "/admin/monitoring/overview"), rule("GET", "/admin/monitoring/designers"), rule("GET", "/admin/sla/metrics"), rule("GET", "/workflow/report")]
   },
   "projects.view": {
     bit: 5,
     module: "projects",
     label: "View all projects and their teams",
-    rules: [rule("GET", "/admin/projects"), rule("GET", `/admin/projects/${ID}`)]
+    rules: [rule("GET", "/admin/projects"), rule("GET", `/admin/projects/${ID}`), rule("GET", `/projects/${ID}/flow`)]
   }
 });
 

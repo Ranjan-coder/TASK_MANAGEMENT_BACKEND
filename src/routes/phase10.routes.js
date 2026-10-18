@@ -90,7 +90,18 @@ adminPaymentRoutes.put(
           gstRatePct: z.number().min(0).max(28),
           notes: text(500).optional().default(""),
           milestones: z
-            .array(z.object({ _id: id.optional(), title: text(80).pipe(z.string().min(2)), amountPaise: paise, dueDate: z.coerce.date().nullable().optional() }).strict())
+            .array(
+              z
+                .object({
+                  _id: id.optional(),
+                  title: text(80).pipe(z.string().min(2)),
+                  amountPaise: paise,
+                  dueDate: z.coerce.date().nullable().optional(),
+                  // Falls due when the project reaches this workflow stage (E4)
+                  stageKey: z.string().regex(/^[a-z][a-z0-9_]{1,39}$/).nullable().optional()
+                })
+                .strict()
+            )
             .max(20)
         })
         .strict()

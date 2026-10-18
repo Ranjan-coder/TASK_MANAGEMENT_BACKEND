@@ -4,6 +4,6 @@
  * route map (config/moduleRoutes.js), app (modules/index.js), socket gate and
  * background jobs all read from this list.
  */
-const MANIFESTS = Object.freeze([require("./planner/manifest")]);
+const MANIFESTS = Object.freeze([require("./planner/manifest"), require("./workflows/manifest")]);
 
 module.exports = { MANIFESTS };

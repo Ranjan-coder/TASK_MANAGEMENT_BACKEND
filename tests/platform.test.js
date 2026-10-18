@@ -38,7 +38,7 @@ describe("module registry", () => {
     expect(modules.fromMask(modules.REQUIRES_MASK.referrals).sort()).toEqual(["customer_portal", "projects"]);
     expect(modules.fromMask(modules.REQUIRES_MASK.moderation).sort()).toEqual(["chat", "projects"]);
     expect(modules.fromMask(modules.DEPENDENTS_MASK.projects).sort()).toEqual(
-      ["chat", "customer_portal", "moderation", "payments", "referrals", "reports"].sort()
+      ["chat", "customer_portal", "moderation", "payments", "referrals", "reports", "workflows"].sort()
     );
     expect(modules.DEPENDENTS_MASK.tasks).toBe(0);
   });

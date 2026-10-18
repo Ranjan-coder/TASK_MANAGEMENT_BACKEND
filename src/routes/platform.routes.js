@@ -163,4 +163,60 @@ router.get("/audit", asyncHandler(async (req, res) => ok(res, await platform.lis
   }
 }
 
+// ── Standard project workflows (project-workflow-plan.md W1, W7) ──
+// New companies start from the default one; companies that started from a workflow
+// are offered its new versions and decide themselves (never pushed).
+{
+  const wt = require("../modules/workflows/template.service");
+  const { recordAuditLog } = require("../services/audit.service");
+  const audit = (req, action, targetId, metadata) => recordAuditLog({ req, action, targetType: "OrgTemplate", targetId, metadata });
+  const params = z.object({ id }).strict();
+  const revision = z.number().int().min(0);
+  const text = (max) => z.string().trim().max(max);
+
+  router.get("/workflows", asyncHandler(async (req, res) => ok(res, await wt.listTemplates())));
+  router.post(
+    "/workflows",
+    validate(z.object({ body: z.object({ name: text(80).min(2), description: text(300).optional(), copyOf: id.nullable().optional() }).strict() })),
+    asyncHandler(async (req, res) => {
+      const out = await wt.createTemplate(req.user, req.body);
+      await audit(req, "workflow_template_created", out._id, { name: out.name, copyOf: req.body.copyOf || null });
+      ok(res, out, "Standard workflow created as a draft", 201);
+    })
+  );
+  router.get("/workflows/:id", validate(z.object({ params })), asyncHandler(async (req, res) => ok(res, await wt.getTemplate(req.params.id))));
+  router.patch(
+    "/workflows/:id",
+    validate(z.object({ params, body: z.object({ name: text(80).min(2).optional(), description: text(300).optional(), archived: z.boolean().optional() }).strict() })),
+    asyncHandler(async (req, res) => {
+      const out = await wt.updateTemplate(req.user, req.params.id, req.body);
+      await audit(req, "workflow_template_updated", out._id, req.body);
+      ok(res, out, "Saved");
+    })
+  );
+  router.put(
+    "/workflows/:id/draft",
+    validate(z.object({ params, body: z.object({ tree: z.object({ stages: z.array(z.record(z.any())).min(1).max(20) }).passthrough(), revision }).strict() })),
+    asyncHandler(async (req, res) => ok(res, await wt.saveTemplateDraft(req.user, req.params.id, req.body), "Draft saved"))
+  );
+  router.post(
+    "/workflows/:id/publish",
+    validate(z.object({ params, body: z.object({ revision }).strict() })),
+    asyncHandler(async (req, res) => {
+      const out = await wt.publishTemplate(req.user, req.params.id, req.body);
+      await audit(req, "workflow_template_published", req.params.id, { version: out.version, stages: out.summary.touchedStages });
+      ok(res, out, `Version ${out.version} published. Companies using it are offered the update.`);
+    })
+  );
+  router.post(
+    "/workflows/:id/default",
+    validate(z.object({ params })),
+    asyncHandler(async (req, res) => {
+      const out = await wt.setDefault(req.user, req.params.id);
+      await audit(req, "workflow_template_default", req.params.id, {});
+      ok(res, out, "New companies will start from this workflow");
+    })
+  );
+}
+
 module.exports = router;
