@@ -13,7 +13,11 @@ const { getCachedSlug } = require("./organisation.service");
  * accepted (it can carry script).
  */
 const IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
-const VIDEO_TYPES = ["video/mp4", "video/webm", "video/quicktime"];
+// m4v / 3gp: what many phones record (same MP4 family; Cloudinary transcodes them)
+const VIDEO_TYPES = ["video/mp4", "video/webm", "video/quicktime", "video/x-m4v", "video/3gpp"];
+const IMAGE_TIMEOUT_MS = 60 * 1000;
+// A 50 MB video needs minutes on an ordinary uplink, not one
+const VIDEO_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
 const MAX_VIDEO_SECONDS = 60;
@@ -30,6 +34,14 @@ const LEGACY_SLUG = (process.env.TENANT_DEFAULT_SLUG || "bonito").toLowerCase();
  */
 const orgFolder = (kind) => `org_${requireOrgId()}/${kind}`;
 
+/**
+ * The full public id ("org_<id>/<kind>/<time>_<random>") is chosen here rather
+ * than through Cloudinary's `folder` option: accounts in dynamic folder mode
+ * ignore `folder` for the public id, which made isOwnMedia reject every
+ * upload. Passing the path in the id gives the same result in both modes.
+ */
+const storedId = (kind, ext = "") => `${orgFolder(kind)}/${Date.now()}_${crypto.randomBytes(8).toString("hex")}${ext}`;
+
 const sniff = async (buffer) => {
   const { fileTypeFromBuffer } = await import("file-type");
   return fileTypeFromBuffer(buffer);
@@ -39,7 +51,7 @@ const cloudinaryReady = () => Boolean(cloudinary.config().cloud_name && cloudina
 
 const uploadBuffer = (buffer, options) =>
   new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream({ timeout: 60000, ...options }, (err, result) => (err ? reject(err) : resolve(result)));
+    const stream = cloudinary.uploader.upload_stream({ timeout: IMAGE_TIMEOUT_MS, ...options }, (err, result) => (err ? reject(err) : resolve(result)));
     stream.end(buffer);
   });
 
@@ -72,7 +84,7 @@ const uploadMedia = async (buffer, purpose) => {
     throw new ApiError(
       400,
       purpose === "campaign"
-        ? "Upload a JPG, PNG or WebP image, or an MP4/WebM/MOV video."
+        ? "Upload a JPG, PNG or WebP image, or an MP4, MOV, M4V, 3GP or WebM video."
         : "Upload a JPG, PNG or WebP image."
     );
   }
@@ -84,10 +96,10 @@ const uploadMedia = async (buffer, purpose) => {
   let result;
   try {
     result = await uploadBuffer(buffer, {
-      folder: orgFolder(FOLDERS[purpose]),
-      public_id: `${Date.now()}_${crypto.randomBytes(8).toString("hex")}`,
+      public_id: storedId(FOLDERS[purpose]),
       resource_type: isVideo ? "video" : "image",
-      overwrite: false
+      overwrite: false,
+      ...(isVideo ? { timeout: VIDEO_TIMEOUT_MS } : {})
     });
   } catch (err) {
     logger.error(`Cloudinary upload failed: ${err.message}`);
@@ -99,16 +111,94 @@ const uploadMedia = async (buffer, purpose) => {
     throw new ApiError(400, `Videos must be ${MAX_VIDEO_SECONDS} seconds or shorter (this one is ${Math.round(result.duration)} s).`);
   }
 
-  return {
-    url: isVideo ? videoUrl(result.public_id) : imageUrl(result.public_id),
-    publicId: result.public_id,
-    resourceType: isVideo ? "video" : "image",
-    posterUrl: isVideo ? videoPosterUrl(result.public_id) : null,
-    width: result.width,
-    height: result.height,
-    duration: isVideo ? Number(result.duration) : undefined,
-    bytes: result.bytes
+  return toAsset(result, isVideo);
+};
+
+/** The media object the editors store (same shape for every upload path). */
+const toAsset = (result, isVideo) => ({
+  url: isVideo ? videoUrl(result.public_id) : imageUrl(result.public_id),
+  publicId: result.public_id,
+  resourceType: isVideo ? "video" : "image",
+  posterUrl: isVideo ? videoPosterUrl(result.public_id) : null,
+  width: result.width,
+  height: result.height,
+  duration: isVideo && Number.isFinite(Number(result.duration)) ? Number(result.duration) : undefined,
+  bytes: result.bytes
+});
+
+// ── Campaign videos: straight from the browser to Cloudinary, in chunks ──────
+//
+// Relaying a video through this server meant holding all of it in memory and
+// keeping the browser waiting through two uploads in a row (browser → server →
+// Cloudinary); a slow second leg ended in a timeout with no message. Now:
+//   1. ticket: the server signs the upload. The public id (this organisation's
+//      folder) and the allowed formats are part of the signature, so the
+//      browser can't store anything elsewhere or of another kind.
+//   2. the browser sends the file to Cloudinary in CHUNK_BYTES pieces
+//      (progress per piece, a failed piece is retried alone).
+//   3. finish: the server asks Cloudinary what actually arrived (format, size,
+//      length) and deletes it if it breaks a rule. The browser's word is never
+//      taken for any of it.
+
+const VIDEO_FORMATS = ["mp4", "mov", "m4v", "3gp", "webm"];
+// Cloudinary: every chunk but the last must be over 5 MB
+const CHUNK_BYTES = 6 * 1024 * 1024;
+
+const videoUploadTicket = (bytes) => {
+  if (!cloudinaryReady()) throw new ApiError(503, "Media storage is not configured (Cloudinary).");
+  if (bytes > MAX_VIDEO_BYTES) throw new ApiError(400, "Videos must be 50 MB or smaller.");
+  const { cloud_name: cloud, api_key: apiKey, api_secret: secret } = cloudinary.config();
+  // Signatures are refused by Cloudinary after an hour
+  const params = {
+    public_id: storedId(FOLDERS.campaign),
+    timestamp: Math.floor(Date.now() / 1000),
+    allowed_formats: VIDEO_FORMATS.join(",")
   };
+  return {
+    uploadUrl: `https://api.cloudinary.com/v1_1/${cloud}/video/upload`,
+    fields: { ...params, api_key: apiKey, signature: cloudinary.utils.api_sign_request(params, secret) },
+    uploadId: crypto.randomBytes(16).toString("hex"),
+    chunkBytes: CHUNK_BYTES
+  };
+};
+
+/** Duration from the Admin API (its key isn't fixed across accounts/versions). */
+const durationOf = (r) => {
+  const d = Number(r.duration ?? r.video_metadata?.duration ?? r.media_metadata?.duration ?? r.video?.duration);
+  return Number.isFinite(d) ? d : null;
+};
+
+const finishVideoUpload = async (publicId, expectedBytes) => {
+  if (!cloudinaryReady()) throw new ApiError(503, "Media storage is not configured (Cloudinary).");
+  // Only ids a ticket for this organisation could have produced
+  if (!isOwnMedia(videoUrl(publicId), publicId, "campaign")) throw new ApiError(400, "Upload the video through the campaign editor");
+  let r;
+  try {
+    r = await cloudinary.api.resource(publicId, { resource_type: "video", media_metadata: true });
+  } catch (err) {
+    const code = err?.error?.http_code ?? err?.http_code;
+    if (code === 404) throw new ApiError(400, "The video didn't finish uploading. Please try again.");
+    logger.error(`Cloudinary lookup failed for ${publicId}: ${err?.error?.message || err?.message}`);
+    throw new ApiError(502, "Couldn't check the video right now. Please try again.");
+  }
+  const duration = durationOf(r);
+  // Cloudinary answers the last piece even if an earlier one never arrived
+  // (seen on a real account: a lone last piece stored as a "complete" file)
+  const problem = Number(r.bytes) !== expectedBytes
+    ? "The video didn't upload completely (part of it never arrived). Please upload it again."
+    : !VIDEO_FORMATS.includes(String(r.format).toLowerCase())
+    ? "Upload an MP4, MOV, M4V, 3GP or WebM video."
+    : Number(r.bytes) > MAX_VIDEO_BYTES
+      ? "Videos must be 50 MB or smaller."
+      : duration !== null && duration > MAX_VIDEO_SECONDS + 0.5
+        ? `Videos must be ${MAX_VIDEO_SECONDS} seconds or shorter (this one is ${Math.round(duration)} s).`
+        : null;
+  if (problem) {
+    await destroyMedia(publicId, "video");
+    throw new ApiError(400, problem);
+  }
+  if (duration === null) logger.warn(`No duration from Cloudinary for ${publicId}; length not checked`);
+  return toAsset({ ...r, public_id: publicId, duration }, true);
 };
 
 /** Best-effort removal of a replaced/deleted asset. */
@@ -156,8 +246,7 @@ const uploadEvidenceImage = async (buffer) => {
   let result;
   try {
     result = await uploadBuffer(clean, {
-      folder: orgFolder(EVIDENCE_FOLDER),
-      public_id: `${Date.now()}_${crypto.randomBytes(8).toString("hex")}`,
+      public_id: storedId(EVIDENCE_FOLDER),
       resource_type: "image",
       type: "private",
       format: "jpg",
@@ -198,8 +287,7 @@ const uploadInvoicePdf = async (buffer) => {
   if (buffer.length > MAX_PDF_BYTES) throw new ApiError(400, "Invoices must be 10 MB or smaller.");
   try {
     const result = await uploadBuffer(buffer, {
-      folder: orgFolder("invoices"),
-      public_id: `${Date.now()}_${crypto.randomBytes(8).toString("hex")}.pdf`,
+      public_id: storedId("invoices", ".pdf"),
       resource_type: "raw",
       type: "private",
       overwrite: false
@@ -231,6 +319,8 @@ module.exports = {
   destroyInvoice,
   MAX_PDF_BYTES,
   uploadMedia,
+  videoUploadTicket,
+  finishVideoUpload,
   destroyMedia,
   isOwnMedia,
   uploadEvidenceImage,

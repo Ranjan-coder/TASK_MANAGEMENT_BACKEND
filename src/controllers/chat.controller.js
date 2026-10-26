@@ -25,11 +25,95 @@ const assertReplyInConversation = async (replyTo, conversationId) => {
   if (!ok) throw new ApiError(400, "You can only reply to messages in this chat");
 };
 const moderationService = require("../services/moderation.service");
+const mentionService = require("../services/mention.service");
+const chatExtras = require("../services/chatExtras.service");
+const customerChat = require("../services/customerChat.service");
+const scheduled = require("../services/scheduled.service");
+const { chatRooms } = require("../services/receipt.service");
+const { forViewer } = require("../utils/chatPrivacy");
+
+/**
+ * Sends an event to every member of a chat: the open-chat room plus each
+ * member's personal room. Socket.IO delivers once per connection even when
+ * it's in several of those rooms, so nobody gets it twice.
+ */
+const emitToMembers = (io, conversation, event, payload) => {
+  if (!io) return;
+  const rooms = [`conv:${conversation._id}`, ...conversation.members.map((m) => `user:${m.user?._id || m.user}`)];
+  io.to(rooms).emit(event, payload);
+};
+
+/** A thread root: a live, top-level, non-system message in this chat (one level of threads only). */
+const parseThreadRoot = async (value, conversationId) => {
+  if (value === undefined || value === null || value === "") return null;
+  if (!isObjectId(String(value))) throw new ApiError(400, "Invalid thread");
+  const root = await require("../models/Message")
+    .findOne({ _id: value, conversation: conversationId })
+    .select("threadRoot type isDeleted")
+    .lean();
+  if (!root || root.type === "system" || root.isDeleted) throw new ApiError(400, "You can only reply in threads of this chat");
+  if (root.threadRoot) throw new ApiError(400, "Replies can't have their own threads", [{ code: "THREAD_NESTED" }]);
+  return String(value);
+};
+
+/** After a reply in a thread (text or file): update the root, tell open screens, notify followers. */
+const afterThreadReply = async ({ message, threadRoot, conversation, sender, io }) => {
+  const root = await chatService.recordThreadReply(threadRoot, message);
+  io?.to(`conv:${conversation._id}`).emit("chat:thread:updated", {
+    conversationId: String(conversation._id),
+    rootId: threadRoot,
+    threadReplyCount: root.threadReplyCount,
+    threadLastReplyAt: root.threadLastReplyAt,
+    threadParticipants: root.threadParticipants
+  });
+  mentionService
+    .afterThreadReply({ message, root, conversation, sender, io })
+    .catch((err) => logger.error(`Thread notifications failed: ${err.message}`));
+};
+
+/**
+ * GET /api/v1/chat/conversations/:id/threads/:rootId?cursor=<msgId>&limit=30
+ * A thread's root and one page of replies (newest page first, oldest-first order).
+ */
+const getThread = asyncHandler(async (req, res) => {
+  if (!isObjectId(req.params.rootId)) throw new ApiError(400, "Invalid thread");
+  const cursor = typeof req.query.cursor === "string" && isObjectId(req.query.cursor) ? req.query.cursor : undefined;
+  const limit = Math.min(parseInt(req.query.limit, 10) || 30, 50);
+  const result = await chatService.getThread({
+    conversationId: req.params.id,
+    rootId: req.params.rootId,
+    cursor,
+    limit,
+    userId: req.user._id
+  });
+  const [root, ...messages] = await withMyStars([result.root, ...result.messages], req.user._id);
+  res.status(200).json(new ApiResponse(200, { ...result, root, messages }, "Thread fetched"));
+});
+
+// Client message ids are random UUIDs made in the browser (letters, digits, dashes)
+const CLIENT_MSG_ID_RE = /^[A-Za-z0-9-]{8,64}$/;
+const parseClientMsgId = (v) => {
+  if (v === undefined || v === null || v === "") return undefined;
+  if (typeof v !== "string" || !CLIENT_MSG_ID_RE.test(v)) throw new ApiError(400, "Invalid clientMsgId");
+  return v;
+};
+
+/** Answer a repeated send with the message already saved (only in the same chat). */
+const replyWithSaved = (res, message, conversationId) => {
+  if (String(message.conversation) !== String(conversationId)) {
+    throw new ApiError(409, "This message id was already used in another chat", [{ code: "CLIENT_ID_REUSED" }]);
+  }
+  return res.status(200).json(new ApiResponse(200, message, "Message already sent"));
+};
 
 /** Project chats are managed only from Admin → Projects. */
 const assertNotProject = (conversation) => {
   if (conversation?.project) {
     throw new ApiError(403, "This project chat is managed by your admins.", [{ code: "PROJECT_MANAGED" }]);
+  }
+  // Team notes follow their project's staff automatically (customers can never be added)
+  if (conversation?.internalFor) {
+    throw new ApiError(403, "Team notes follow the project team automatically.", [{ code: "PROJECT_MANAGED" }]);
   }
 };
 
@@ -83,6 +167,18 @@ const publishPublicKey = asyncHandler(async (req, res) => {
   user.keyVersion = keyVersion;
   user.keyUpdatedAt = new Date();
   await user.save({ validateBeforeSave: false });
+
+  // Their groups' admins can now wrap the keys for this new device key: ask them now
+  const io = getIO();
+  if (io) {
+    const groups = await require("../models/Conversation")
+      .find({ type: "group", "members.user": req.user._id })
+      .select("type members groupKeyring rekeyRequested")
+      .populate("members.user", "publicKey")
+      .limit(500)
+      .lean();
+    for (const g of groups) groupKeys.requestKeyHelp(io, g);
+  }
 
   res.status(200).json(new ApiResponse(200, { keyVersion }, "Public key published successfully"));
 });
@@ -211,7 +307,7 @@ const getRecoveryBundle = asyncHandler(async (req, res) => {
  * List all conversations for the authenticated user.
  */
 const getConversations = asyncHandler(async (req, res) => {
-  const conversations = await chatService.getUserConversations(req.user._id);
+  const conversations = await chatService.getUserConversations(req.user._id, req.user.role);
   res.status(200).json(new ApiResponse(200, conversations, "Conversations fetched"));
 });
 
@@ -285,7 +381,24 @@ const getConversation = asyncHandler(async (req, res) => {
 
   if (!conv) throw new ApiError(404, "Conversation not found");
 
-  res.status(200).json(new ApiResponse(200, withoutMissingPeople(conv), "Conversation retrieved"));
+  const [withState] = await mentionService.withMyState([forViewer(withoutMissingPeople(conv), req.user._id, req.user.role)], req.user._id);
+  res.status(200).json(new ApiResponse(200, withState, "Conversation retrieved"));
+});
+
+/**
+ * PATCH /api/v1/chat/conversations/:id/notify  { notify?: all|mentions|off, muteFor?: 1h|8h|1w|always|none }
+ * This person's own notification choice for the chat (nobody else sees it).
+ */
+const updateNotify = asyncHandler(async (req, res) => {
+  const state = await mentionService.setNotify({
+    conversation: req.conversation,
+    userId: req.user._id,
+    notify: req.body?.notify,
+    muteFor: req.body?.muteFor
+  });
+  // The person's other tabs and devices update their bell too
+  getIO()?.to(`user:${req.user._id}`).emit("chat:notify", { conversationId: req.params.id, ...state });
+  res.status(200).json(new ApiResponse(200, state, "Notification settings saved"));
 });
 
 /**
@@ -349,6 +462,8 @@ const addMember = asyncHandler(async (req, res) => {
       user: newUser,
       groupKeyring: conversation.groupKeyring
     });
+    // No key handed over with the add (e.g. they hadn't set up chat): the admins' apps share it later
+    groupKeys.requestKeyHelp(io, conversation);
   }
 
   res.status(200).json(new ApiResponse(200, conversation, "Member added"));
@@ -374,7 +489,7 @@ const removeMember = asyncHandler(async (req, res) => {
     });
     // Remove the kicked user's live connections from the room so they stop
     // receiving new messages (every socket joins its user's own room)
-    io.in(`user:${req.params.userId}`).socketsLeave(`conv:${req.params.id}`);
+    io.in(`user:${req.params.userId}`).socketsLeave(chatRooms(req.params.id));
   }
 
   res.status(200).json(new ApiResponse(200, null, "Member removed"));
@@ -442,20 +557,113 @@ const shareGroupKeys = asyncHandler(async (req, res) => {
  */
 const getMessages = asyncHandler(async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 30, 50);
-  const { cursor } = req.query;
+  const { cursor, around, after } = req.query;
+  for (const v of [cursor, around, after]) {
+    if (v !== undefined && !isObjectId(v)) throw new ApiError(400, "Invalid cursor");
+  }
 
-  // req.conversation is set by the requireMembership middleware on this route.
-  const member = req.conversation.members.find((m) => m.user.toString() === req.user._id.toString());
-
-  const result = await chatService.getMessages({
-    conversationId: req.params.id,
-    cursor,
-    limit,
-    userId: req.user._id,
-    lastRead: member?.lastRead || null
-  });
-
+  let result;
+  if (around) {
+    // Jump to a message (search, star, pin, older mention)
+    result = await chatService.getMessagesAround({ conversationId: req.params.id, aroundId: around, limit, userId: req.user._id });
+  } else if (after) {
+    // Newer page after a jump
+    result = await chatService.getMessagesAfter({ conversationId: req.params.id, afterId: after, limit, userId: req.user._id });
+  } else {
+    // req.conversation is set by the requireMembership middleware on this route.
+    const member = req.conversation.members.find((m) => m.user.toString() === req.user._id.toString());
+    result = await chatService.getMessages({
+      conversationId: req.params.id,
+      cursor,
+      limit,
+      userId: req.user._id,
+      lastRead: member?.lastRead || null
+    });
+  }
+  result.messages = await withMyStars(result.messages, req.user._id);
   res.status(200).json(new ApiResponse(200, result, "Messages fetched"));
+});
+
+/** Marks which messages the viewer starred (★), one query per page. */
+const withMyStars = async (messages, userId) => {
+  const starred = await chatExtras.starredAmong(userId, messages.map((m) => m._id));
+  return messages.map((m) => (starred.has(String(m._id)) ? { ...m, starred: true } : m));
+};
+
+// ── Pins and stars (chat-features-plan.md CH-P) ──────────────────────────────
+
+const getPins = asyncHandler(async (req, res) => {
+  const pins = await chatExtras.listPins({ conversationId: req.params.id, userId: req.user._id });
+  res.status(200).json(new ApiResponse(200, { pins, canPin: chatExtras.canPin(req.conversation, req.user) }));
+});
+
+const changePin = (action) =>
+  asyncHandler(async (req, res) => {
+    const pins = await chatExtras[action]({ conversation: req.conversation, user: req.user, messageId: req.params.msgId });
+    getIO()?.to(`conv:${req.params.id}`).emit("chat:pins:updated", { conversationId: req.params.id, pins });
+    res.status(200).json(new ApiResponse(200, { pins }));
+  });
+const pinMessage = changePin("pin");
+const unpinMessage = changePin("unpin");
+
+const starMessage = asyncHandler(async (req, res) => {
+  await chatExtras.star({ userId: req.user._id, messageId: req.params.id });
+  getIO()?.to(`user:${req.user._id}`).emit("chat:starred", { messageId: req.params.id, starred: true });
+  res.status(200).json(new ApiResponse(200, { starred: true }));
+});
+
+const unstarMessage = asyncHandler(async (req, res) => {
+  await chatExtras.unstar({ userId: req.user._id, messageId: req.params.id });
+  getIO()?.to(`user:${req.user._id}`).emit("chat:starred", { messageId: req.params.id, starred: false });
+  res.status(200).json(new ApiResponse(200, { starred: false }));
+});
+
+// ── Customer experience (P4) ─────────────────────────────────────────────────
+
+/** GET /conversations/:id/service-info: the project chat banner (open now, hours, typical reply time). */
+const getServiceInfo = asyncHandler(async (req, res) => {
+  res.status(200).json(new ApiResponse(200, await customerChat.serviceInfo(req.conversation)));
+});
+
+/** POST /conversations/:id/team-notes { encryptedGroupKeys? }: open or start the staff-only notes chat. */
+const openTeamNotes = asyncHandler(async (req, res) => {
+  const result = await customerChat.openTeamNotes({ project: req.conversation, user: req.user, encryptedGroupKeys: req.body?.encryptedGroupKeys });
+  if (result.created) {
+    const notes = await require("../models/Conversation")
+      .findById(result.conversationId)
+      .populate("members.user", "name avatarUrl status publicKey keyVersion");
+    const io = getIO();
+    for (const m of notes.members) io?.to(`user:${m.user._id}`).emit("conversation:created", withoutMissingPeople(notes));
+    groupKeys.requestKeyHelp(io, notes); // teammates who hadn't set up chat yet get the key later
+  }
+  res.status(result.created ? 201 : 200).json(new ApiResponse(result.created ? 201 : 200, result));
+});
+
+/** GET /conversations/:id/files?kind=image|doc|audio&cursor= */
+const getFiles = asyncHandler(async (req, res) => {
+  const kind = typeof req.query.kind === "string" ? req.query.kind : "image";
+  const cursor = typeof req.query.cursor === "string" ? req.query.cursor : undefined;
+  res.status(200).json(new ApiResponse(200, await chatExtras.listFiles({ conversationId: req.params.id, userId: req.user._id, kind, cursor })));
+});
+
+/** POST /conversations/:id/scheduled { …same as a message…, sendAt } */
+const scheduleMessage = asyncHandler(async (req, res) => {
+  const item = await scheduled.schedule({ conversation: req.conversation, sender: req.user, body: req.body });
+  res.status(201).json(new ApiResponse(201, item, "Message scheduled"));
+});
+
+const listScheduled = asyncHandler(async (req, res) => {
+  res.status(200).json(new ApiResponse(200, await scheduled.listMine({ conversationId: req.params.id, userId: req.user._id })));
+});
+
+const cancelScheduled = asyncHandler(async (req, res) => {
+  res.status(200).json(new ApiResponse(200, await scheduled.cancel({ id: req.params.sid, userId: req.user._id }), "Scheduled message cancelled"));
+});
+
+const getStarred = asyncHandler(async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 30, 50);
+  const cursor = typeof req.query.cursor === "string" ? req.query.cursor : undefined;
+  res.status(200).json(new ApiResponse(200, await chatExtras.listStarred({ userId: req.user._id, cursor, limit })));
 });
 
 /**
@@ -465,61 +673,102 @@ const getMessages = asyncHandler(async (req, res) => {
  * Body: { ciphertext, iv, type?, attachments?, replyTo? }
  * For system messages: { type: "system", content: "..." }
  */
-const sendMessage = asyncHandler(async (req, res) => {
-  const { ciphertext, iv, type, attachments, replyTo, keyRef, franking, moderation } = req.body;
-
+/**
+ * Checks an encrypted text message and returns the fields to store. Used when
+ * it's sent and when it's scheduled (scheduled.service.js), so both follow the
+ * same rules. Throws 400/403 for anything not allowed.
+ */
+const prepareTextMessage = async ({ conversation, sender, body }) => {
+  const { ciphertext, iv, type, attachments, replyTo, keyRef, franking, moderation } = body || {};
   // System messages are created only by the server (never by clients), so a
   // member can't post fake notices in plain text.
-  const messageType = type || "text";
-  if (messageType !== "text") {
-    throw new ApiError(400, "Send files through the attachment upload");
-  }
+  if ((type || "text") !== "text") throw new ApiError(400, "Send files through the attachment upload");
   if (attachments && attachments.length) throw new ApiError(400, "Send files through the attachment upload");
-  await assertReplyInConversation(replyTo, req.params.id);
-  if (!ciphertext || !iv) {
+  await assertReplyInConversation(replyTo, String(conversation._id));
+  if (!ciphertext || !iv || typeof ciphertext !== "string" || typeof iv !== "string") {
     throw new ApiError(400, "ciphertext and iv are required for encrypted messages");
   }
+  if (ciphertext.length > 200_000 || iv.length > 64) throw new ApiError(400, "Message is too long");
 
   // Project chats: text must carry a franking commitment so it can be reported with proof
-  const frankingRecord =
-    messageType === "text"
-      ? stampFranking({ commitment: franking?.commitment, conversationId: String(req.params.id), senderId: String(req.user._id) })
-      : undefined;
-  if (req.conversation.project && messageType === "text" && !frankingRecord) {
+  const commitment = franking?.commitment;
+  const frankOk = Boolean(stampFranking({ commitment, conversationId: String(conversation._id), senderId: String(sender._id) }));
+  if (conversation.project && !frankOk) {
     throw new ApiError(400, "This chat needs an updated app. Please reload the page.", [{ code: "FRANKING_REQUIRED" }]);
   }
 
-  const message = await chatService.saveMessage({
-    conversationId: req.params.id,
-    senderId: req.user._id,
-    type: messageType,
+  // Who the (encrypted) text mentions, as plain ids the app lists (CH-D1)
+  const { mentions, mentionsAll } = mentionService.parseMentions(body, { conversation, sender });
+  // A reply in a thread (CH-T): the root must be a live, top-level message of this chat
+  const threadRoot = await parseThreadRoot(body.threadRoot, String(conversation._id));
+  if (body.alsoInChat !== undefined && typeof body.alsoInChat !== "boolean") throw new ApiError(400, "Invalid alsoInChat");
+  // "Forwarded" label (P4). Customers can't forward (keeps project content in its chat).
+  if (body.forwarded !== undefined && typeof body.forwarded !== "boolean") throw new ApiError(400, "Invalid forwarded");
+  if (body.forwarded && sender.role === ROLES.CUSTOMER) throw new ApiError(403, "Customers can't forward messages");
+
+  return {
     ciphertext,
     iv,
-    content: null,
-    attachments: attachments || [],
     replyTo: replyTo || null,
-    keyRef: groupKeys.parseKeyRef(keyRef, req.conversation),
-    franking: frankingRecord,
-    moderation: moderationService.parseModeration(moderation, { messageType, conversation: req.conversation })
+    keyRef: groupKeys.parseKeyRef(keyRef, conversation),
+    commitment: frankOk ? commitment : undefined,
+    moderation: moderationService.parseModeration(moderation, { messageType: "text", conversation }),
+    mentions,
+    mentionsAll,
+    threadRoot,
+    alsoInChat: Boolean(threadRoot && body.alsoInChat),
+    forwarded: body.forwarded ? true : undefined
+  };
+};
+
+/**
+ * Saves a checked text message and does everything a new message triggers:
+ * live delivery to members, thread updates, reply timers, abuse counts,
+ * mentions. The franking stamp carries the time it's actually sent.
+ */
+const publishTextMessage = async ({ conversation, sender, fields, clientMsgId }) => {
+  const franking = fields.commitment
+    ? stampFranking({ commitment: fields.commitment, conversationId: String(conversation._id), senderId: String(sender._id) })
+    : undefined;
+  const message = await chatService.saveMessage({
+    conversationId: conversation._id,
+    senderId: sender._id,
+    type: "text",
+    ciphertext: fields.ciphertext,
+    iv: fields.iv,
+    content: null,
+    attachments: [],
+    replyTo: fields.replyTo,
+    keyRef: fields.keyRef,
+    franking,
+    moderation: fields.moderation,
+    clientMsgId,
+    mentions: fields.mentions,
+    mentionsAll: fields.mentionsAll,
+    threadRoot: fields.threadRoot,
+    alsoInChat: fields.alsoInChat,
+    forwarded: fields.forwarded
   });
 
-  // Broadcast to everyone in the room (including sender for echo confirmation)
+  // To every member (sidebar previews, unread and mention badges), including the sender's other tabs
   const io = getIO();
-  if (io) {
-    io.to(`conv:${req.params.id}`).emit("chat:message", message);
-  }
+  emitToMembers(io, conversation, "chat:message", message);
 
-  // Project chats: start or stop the reply timer; count abuse flags (never fail the send)
-  // The three hooks are independent: run them together (latency = slowest, not the sum).
+  // Thread reply: the root's "N replies" updates on open screens; followers are told
+  if (fields.threadRoot) await afterThreadReply({ message, threadRoot: fields.threadRoot, conversation, sender, io });
+
+  // Project chats: start or stop the reply timer; count abuse flags; count and
+  // notify mentions (never fail the send). Independent: run them together.
   const hooks = [
-    require("../services/sla.service").onMessage({ conversation: req.conversation, sender: req.user }),
-    require("../services/offlineAlerts.service").onStaffMessage({ conversation: req.conversation, sender: req.user })
+    require("../services/sla.service").onMessage({ conversation, sender }),
+    require("../services/offlineAlerts.service").onStaffMessage({ conversation, sender }),
+    mentionService.afterMessage({ message, conversation, sender, io })
   ];
-  if (messageType === "text" && req.conversation.project) {
+  if (conversation.project) {
     hooks.push(
       moderationService.afterTextMessage({
-        conversation: req.conversation,
-        sender: req.user,
+        conversation,
+        sender,
         newHits: message.moderation?.hitCount || 0,
         severity: message.moderation?.severity
       })
@@ -527,7 +776,31 @@ const sendMessage = asyncHandler(async (req, res) => {
   }
   const settled = await Promise.allSettled(hooks);
   for (const s of settled) if (s.status === "rejected") logger.error(`sendMessage hook failed: ${s.reason?.message}`);
+  return message;
+};
 
+const sendMessage = asyncHandler(async (req, res) => {
+  const clientMsgId = parseClientMsgId(req.body.clientMsgId);
+
+  // A retry of a message that already reached us: hand back the saved copy
+  // (no second broadcast, no hooks), so a flaky network never sends it twice.
+  if (clientMsgId) {
+    const existing = await chatService.findByClientMsgId(req.user._id, clientMsgId);
+    if (existing) return replyWithSaved(res, existing, req.params.id);
+  }
+
+  const fields = await prepareTextMessage({ conversation: req.conversation, sender: req.user, body: req.body });
+  let message;
+  try {
+    message = await publishTextMessage({ conversation: req.conversation, sender: req.user, fields, clientMsgId });
+  } catch (err) {
+    // Two copies of the same retry raced: the unique index let one in
+    if (err?.code === 11000 && clientMsgId) {
+      const existing = await chatService.findByClientMsgId(req.user._id, clientMsgId);
+      if (existing) return replyWithSaved(res, existing, req.params.id);
+    }
+    throw err;
+  }
   res.status(201).json(new ApiResponse(201, message, "Message sent"));
 });
 
@@ -541,17 +814,15 @@ const markRead = asyncHandler(async (req, res) => {
   if (!message) throw new ApiError(404, "Message not found");
   await chatService.assertMembership(message.conversation, req.user._id);
 
+  // Receipts go to the chat's open screens from markAsRead (team vs customer view, CH-D3)
   await chatService.markAsRead(message.conversation, req.user._id);
 
-  // Broadcast read receipt to room members
-  const io = getIO();
-  if (io) {
-    io.to(`conv:${message.conversation}`).emit("chat:read", {
-      conversationId: message.conversation,
-      userId: req.user._id,
-      lastRead: new Date()
-    });
-  }
+  // My other tabs and devices clear their unread badge
+  getIO()?.to(`user:${req.user._id}`).emit("chat:read", {
+    conversationId: message.conversation,
+    userId: req.user._id,
+    lastRead: new Date()
+  });
 
   res.status(200).json(new ApiResponse(200, null, "Marked as read"));
 });
@@ -614,11 +885,14 @@ const deleteMessage = asyncHandler(async (req, res) => {
   }
 
   const message = await chatService.deleteMessageForEveryone(req.params.id, req.user._id);
+  // A deleted message doesn't stay pinned
+  const pinsChanged = (await chatExtras.unpinDeleted(message.conversation, message._id)).modifiedCount > 0;
   if (io) {
     io.to(`conv:${message.conversation}`).emit("chat:message:deleted", {
       messageId: message._id,
       conversationId: message.conversation
     });
+    if (pinsChanged) io.to(`conv:${message.conversation}`).emit("chat:pins:updated", { conversationId: String(message.conversation) });
   }
 
   res.status(200).json(new ApiResponse(200, null, "Message deleted"));
@@ -711,6 +985,10 @@ const editMessage = asyncHandler(async (req, res) => {
 
 module.exports = {
   assertReplyInConversation,
+  parseThreadRoot,
+  afterThreadReply,
+  prepareTextMessage,
+  publishTextMessage,
 
   publishPublicKey,
   getPublicKey,
@@ -722,10 +1000,24 @@ module.exports = {
   createConversation,
   getConversation,
   updateConversation,
+  updateNotify,
   addMember,
   removeMember,
   updateGroupKeys,
   getMessages,
+  getThread,
+  getPins,
+  pinMessage,
+  unpinMessage,
+  starMessage,
+  unstarMessage,
+  getStarred,
+  getServiceInfo,
+  openTeamNotes,
+  getFiles,
+  scheduleMessage,
+  listScheduled,
+  cancelScheduled,
   sendMessage,
   markRead,
   reactToMessage,

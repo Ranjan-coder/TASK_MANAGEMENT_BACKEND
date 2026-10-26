@@ -4,7 +4,7 @@ const config = require("../config/env");
 const User = require("../models/User");
 const Task = require("../models/Task");
 const logger = require("../utils/logger");
-const { registerChatEvents, setOnline } = require("./chat.socket");
+const { registerChatEvents, setOnline, requestPendingKeyHelp } = require("./chat.socket");
 const tenant = require("../utils/tenantContext");
 const { getOrgStatus, getEntitlements } = require("../services/organisation.service");
 const { effectiveUserMask } = require("../services/moduleAccess.service");
@@ -46,6 +46,11 @@ const initSockets = (httpServer) => {
     },
     pingTimeout: 20000 // detect dead clients (and show them offline) in ~45 s instead of ~85 s
   });
+
+  // Several server instances share rooms through Redis when it's configured
+  require("./redisAdapter")
+    .attachRedisAdapter(io)
+    .catch((err) => logger.warn(`Socket Redis adapter skipped: ${err.message}`));
 
   // Socket Authentication Handshake
   io.use(async (socket, next) => {
@@ -98,6 +103,7 @@ const initSockets = (httpServer) => {
 
       socket.user = user;
       socket.data.sessionId = decoded.sid;
+      socket.data.userId = String(user._id); // readable from other servers (fetchSockets)
       next();
     } catch (err) {
       next(new Error("WebSocket authentication failed"));
@@ -167,6 +173,10 @@ const initSockets = (httpServer) => {
     // Presence after handlers are registered (awaiting it first dropped early
     // join:conversation events) and without blocking the connection.
     setOnline(socket.user._id.toString(), io).catch((err) => logger.warn(`setOnline failed: ${err.message}`));
+    // Keys teammates are still waiting for (handled by this person's app if they're a group admin)
+    if (socket.user.role !== "customer") {
+      requestPendingKeyHelp(socket.user._id.toString(), io).catch((err) => logger.warn(`Key help sweep failed: ${err.message}`));
+    }
 
     socket.on("disconnect", () => {
       logger.debug(`Socket disconnected: ${socket.id}`);

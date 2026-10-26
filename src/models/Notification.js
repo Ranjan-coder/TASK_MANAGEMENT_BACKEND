@@ -21,6 +21,7 @@ const notificationSchema = new mongoose.Schema(
         "task_status_changed",
         "comment_added",
         "mentioned",
+        "thread_reply", // chat thread followers (generic text: messages are end-to-end encrypted)
         "due_date_reminder",
         "task_completed",
         "account_created",

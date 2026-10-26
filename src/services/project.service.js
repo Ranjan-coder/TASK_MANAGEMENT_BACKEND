@@ -4,10 +4,11 @@ const Message = require("../models/Message");
 const User = require("../models/User");
 const ApiError = require("../utils/ApiError");
 const { withoutMissingPeople } = require("../utils/presentPeople");
+const { forViewer } = require("../utils/chatPrivacy");
 const { currentOrgName } = require("./organisation.service");
 const logger = require("../utils/logger");
 const { ROLES } = require("../config/roles");
-const { buildInitialKeyring, dropMemberKeys } = require("./groupKeys.service");
+const { buildInitialKeyring, dropMemberKeys, requestKeyHelp } = require("./groupKeys.service");
 
 /**
  * Project chats: group conversations that Bonito admins set up for a customer
@@ -146,7 +147,10 @@ const createProject = async ({ actor, name, customerIds, leadDesignerId, backupD
   await postSystemMessage(conversation._id, actor._id, `${await currentOrgName("Your team")} created this project chat for ${name.trim()}.`);
   const populated = await populateProject(Conversation.findById(conversation._id));
 
-  emit((io) => memberIds.forEach((uid) => io.to(`user:${uid}`).emit("conversation:created", populated)));
+  // Per person: customers don't see the team's individual read times (CH-D3)
+  emit((io) => memberIds.forEach((uid) => io.to(`user:${uid}`).emit("conversation:created", forViewer(populated, uid))));
+  // The creating admin isn't a member: ask the team's admins to replace its key now
+  emit((io) => requestKeyHelp(io, conversation));
   notifyUsers(team.customers, {
     title: "Your project chat is ready",
     message: `Chat with your design team about "${name.trim()}" in Chat.`
@@ -216,14 +220,46 @@ const updateProject = async (id, { actor, name, status, customerIds, leadDesigne
   for (const text of notices) await postSystemMessage(conversation._id, actor._id, text);
   const populated = await populateProject(Conversation.findById(conversation._id));
 
+  // Team notes follow the staff (P4): people taken off the project lose them at once
+  // A failure here would leave removed staff in the notes: try again, then report it loudly
+  const { syncTeamNotes } = require("./customerChat.service");
+  let notesSync = null;
+  try {
+    notesSync = await syncTeamNotes(conversation);
+  } catch (err) {
+    try {
+      notesSync = await syncTeamNotes(await Conversation.findById(conversation._id));
+    } catch (err2) {
+      logger.error(`SECURITY: team notes of project ${conversation._id} not synced after a team change: ${err2.message} (first: ${err.message})`);
+    }
+  }
+  if (notesSync?.notesId) {
+    const notesConv = await Conversation.findById(notesSync.notesId).populate("members.user", "name avatarUrl status publicKey keyVersion");
+    emit((io) => {
+      for (const uid of notesSync.removed) {
+        io.in(`user:${uid}`).socketsLeave(require("./receipt.service").chatRooms(notesSync.notesId));
+        io.to(`user:${uid}`).emit("chat:member:removed", { conversationId: notesSync.notesId, userId: uid });
+      }
+      for (const uid of notesSync.added) io.to(`user:${uid}`).emit("conversation:created", withoutMissingPeople(notesConv));
+      requestKeyHelp(io, notesConv); // new staff need the notes key; removals need a new one
+    });
+  }
+
+  // New people need the key; after a removal it must be replaced. Ask the admins' apps now.
+  emit((io) => requestKeyHelp(io, conversation));
+
   emit((io) => {
     // Removed people stop receiving this chat's live events immediately
     removed.forEach((uid) => {
-      io.in(`user:${uid}`).socketsLeave(`conv:${id}`);
+      io.in(`user:${uid}`).socketsLeave(require("./receipt.service").chatRooms(id));
       io.to(`user:${uid}`).emit("chat:member:removed", { conversationId: id, userId: uid });
     });
-    added.forEach((uid) => io.to(`user:${uid}`).emit("conversation:created", populated));
-    io.to(`conv:${id}`).emit("chat:project:updated", populated);
+    added.forEach((uid) => io.to(`user:${uid}`).emit("conversation:created", forViewer(populated, uid)));
+    // Per member rather than to the room: each gets the copy they may see (CH-D3)
+    for (const m of populated?.members || []) {
+      const uid = String(m.user?._id || m.user);
+      io.to(`user:${uid}`).emit("chat:project:updated", forViewer(populated, uid));
+    }
   });
   const addedCustomers = added.filter((u) => team.customers.includes(u));
   if (addedCustomers.length) {

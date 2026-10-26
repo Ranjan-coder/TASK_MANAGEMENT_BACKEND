@@ -60,6 +60,7 @@ const updateSettings = async (patch, actorId) => {
   if (patch.businessHours) update.businessHours = { ...patch.businessHours, utcOffsetMinutes: 330 };
   if (patch.holidays) update.holidays = patch.holidays;
   if (patch.sla) update.sla = patch.sla;
+  if (patch.awayMessage !== undefined) update.awayMessage = patch.awayMessage;
   if (patch.moderation) update.moderation = patch.moderation;
   if (patch.payments) {
     const current = (await loadSettings()).payments || {};

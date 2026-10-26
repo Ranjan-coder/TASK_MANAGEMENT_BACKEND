@@ -203,7 +203,43 @@ const getPublicKeyVersion = async (userId, version) => {
   return { user, publicKey: entry.publicKey, keyVersion: entry.version };
 };
 
+/**
+ * Members who have no copy of the group's newest key yet (just added, or the
+ * key was made before they set up chat). Legacy chats without a keyring: none.
+ */
+const membersWithoutKey = (conversation) => {
+  const latest = latestVersion(conversation);
+  if (!latest) return [];
+  const ring = conversation.groupKeyring.find((r) => r.version === latest);
+  const has = (id) => (ring.keys instanceof Map ? ring.keys.has(id) : Boolean(ring.keys?.[id]));
+  return conversation.members
+    .filter((m) => m.user) // populated accounts that no longer exist come back as null
+    // With members populated: someone who never set up chat can't be given a key yet (skip them)
+    .filter((m) => !(m.user && typeof m.user === "object" && "publicKey" in m.user && !m.user.publicKey))
+    .map((m) => String(m.user?._id || m.user))
+    .filter((id) => !has(id));
+};
+
+/**
+ * Asks the chat's key holders (group admins: in project chats the lead, backup
+ * designer and manager) to share or replace keys now, in the background,
+ * instead of whenever one of them next opens the chat. Only a signal: the
+ * keys themselves are wrapped in their browsers (the server can't).
+ */
+const requestKeyHelp = (io, conversation, onlyTo = null) => {
+  if (!io || !conversation || conversation.type !== "group") return false;
+  const needsShare = membersWithoutKey(conversation).length > 0;
+  if (!needsShare && !conversation.rekeyRequested) return false;
+  const admins = conversation.members.filter((m) => m.role === "admin").map((m) => String(m.user?._id || m.user));
+  const targets = onlyTo ? admins.filter((id) => id === String(onlyTo)) : admins;
+  if (!targets.length) return false;
+  io.to(targets.map((id) => `user:${id}`)).emit("chat:keys:needed", { conversationId: String(conversation._id) });
+  return true;
+};
+
 module.exports = {
+  membersWithoutKey,
+  requestKeyHelp,
   buildInitialKeyring,
   rotateGroupKey,
   shareGroupKeys,

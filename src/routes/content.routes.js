@@ -42,6 +42,9 @@ const adminContentRoutes = express.Router();
 adminContentRoutes.use(authMiddleware, rbacMiddleware(...content.CONTENT_MANAGERS));
 
 adminContentRoutes.post("/media", uploadLimiter, resumeTenant(mediaUpload.single("file")), content.uploadContentMedia);
+// Campaign videos go from the browser straight to Cloudinary (media.service.js)
+adminContentRoutes.post("/media/video-ticket", uploadLimiter, validate(v.videoTicketSchema), content.createVideoTicket);
+adminContentRoutes.post("/media/video-finish", uploadLimiter, validate(v.videoFinishSchema), content.finishVideo);
 
 adminContentRoutes.get("/campaigns", content.listCampaigns);
 adminContentRoutes.post("/campaigns", validate(v.createCampaignSchema), content.createCampaign);

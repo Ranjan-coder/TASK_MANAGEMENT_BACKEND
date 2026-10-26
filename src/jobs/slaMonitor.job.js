@@ -24,6 +24,9 @@ const tick = async () => {
     if (count) logger.info(`[SlaMonitor] processed ${count} waiting chat(s)`);
     const alerts = await forEachOrg("OfflineAlerts", () => require("../services/offlineAlerts.service").processDue(), { module: "chat" });
     if (alerts) logger.info(`[SlaMonitor] processed ${alerts} offline alert(s)`);
+    // Scheduled chat messages that are due (chat-features-plan.md P4)
+    const scheduled = await forEachOrg("ScheduledMessages", () => require("../services/scheduled.service").processDue(), { module: "chat" });
+    if (scheduled) logger.info(`[SlaMonitor] sent ${scheduled} scheduled message(s)`);
     await forEachOrg("Retention", () => require("../services/privacy.service").runRetentionIfDue());
     const reminders = await forEachOrg("PaymentReminders", () => require("../services/payments.service").runReminders(), { module: "payments" });
     if (reminders) logger.info(`[SlaMonitor] sent ${reminders} payment reminder(s)`);

@@ -42,11 +42,12 @@ class HybridStore {
 }
 
 let limiterCount = 0;
-const createLimiter = ({ windowMs, max, message, keyGenerator }) => {
+const createLimiter = ({ windowMs, max, message, keyGenerator, skip }) => {
   limiterCount += 1;
   return rateLimit({
     windowMs,
     max,
+    ...(skip ? { skip } : {}),
     standardHeaders: true,
     legacyHeaders: false,
     passOnStoreError: true, // a Redis hiccup must not take the API down

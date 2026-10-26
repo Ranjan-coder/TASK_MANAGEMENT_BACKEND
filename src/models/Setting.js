@@ -24,6 +24,9 @@ const settingSchema = new mongoose.Schema(
       utcOffsetMinutes: { type: Number, default: 330 } // IST
     },
     holidays: { type: [holidaySchema], default: [] },
+    // Posted in project chats when a customer writes outside business hours
+    // (the expected reply time is added automatically). Empty = the default text.
+    awayMessage: { type: String, trim: true, maxlength: 300, default: "" },
     sla: {
       autoReplyMin: { type: Number, default: 15 },
       remindMin: { type: Number, default: 60 },

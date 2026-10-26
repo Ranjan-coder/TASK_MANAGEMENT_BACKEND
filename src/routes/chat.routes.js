@@ -5,7 +5,8 @@ const router = express.Router();
 const chatController = require("../controllers/chat.controller");
 const { uploadChatAttachment } = require("../controllers/chat.upload.controller");
 const authMiddleware = require("../middlewares/auth.middleware");
-const upload = require("../middlewares/upload.middleware");
+// Chat files arrive encrypted (always application/octet-stream): their own filter
+const upload = require("../middlewares/chatUpload.middleware");
 const asyncHandler = require("../utils/asyncHandler");
 const ApiError = require("../utils/ApiError");
 const Conversation = require("../models/Conversation");
@@ -18,7 +19,7 @@ router.use(authMiddleware);
 // Files: 60 per hour per person (each up to the upload size limit)
 const attachmentLimiter = require("../middlewares/rateLimiter.middleware").createLimiter({
   windowMs: 60 * 60 * 1000,
-  max: 60,
+  max: () => Number(process.env.CHAT_ATTACHMENT_LIMIT_PER_HOUR) || 60,
   message: "You've sent a lot of files. Please wait a little."
 });
 const reactionLimiter = require("../middlewares/rateLimiter.middleware").createLimiter({ windowMs: 60 * 1000, max: 60, message: "Too many reactions." });
@@ -26,9 +27,19 @@ const reactionLimiter = require("../middlewares/rateLimiter.middleware").createL
 // Shared hybrid store: uses Redis when it's up, memory otherwise (decided per request, not at load).
 const messageLimiter = require("../middlewares/rateLimiter.middleware").createLimiter({
   windowMs: 60 * 1000,
-  max: 60,
+  max: () => Number(process.env.CHAT_MESSAGE_LIMIT_PER_MIN) || 60,
   message: "Message rate limit exceeded. Please slow down.",
   keyGenerator: (req) => `chat:${req.user?._id || req.ip}`
+});
+
+// Mentions notify people: at most 10 mention-carrying messages a minute per person
+// (plain messages aren't counted here), so @-pings can't be used to spam.
+const mentionLimiter = require("../middlewares/rateLimiter.middleware").createLimiter({
+  windowMs: 60 * 1000,
+  max: () => Number(process.env.CHAT_MENTION_LIMIT_PER_MIN) || 10,
+  message: "You've mentioned people a lot just now. Please wait a minute.",
+  keyGenerator: (req) => `mention:${req.user?._id || req.ip}`,
+  skip: (req) => !(Array.isArray(req.body?.mentions) && req.body.mentions.length) && !req.body?.mentionsAll
 });
 
 // ── Membership guard middleware ───────────────────────────────────────────────
@@ -79,6 +90,8 @@ router.post("/conversations", chatController.createConversation);
 
 router.get("/conversations/:id", requireMembership, chatController.getConversation);
 router.patch("/conversations/:id", requireMembership, chatController.updateConversation);
+// My own notification choice for this chat (all / mentions only / off, snooze)
+router.patch("/conversations/:id/notify", requireMembership, chatController.updateNotify);
 
 // Group member management
 router.post("/conversations/:id/members", requireMembership, chatController.addMember);
@@ -88,7 +101,26 @@ router.post("/conversations/:id/group-keys/share", requireMembership, chatContro
 
 // ── Message Routes ───────────────────────────────────────────────────────────
 router.get("/conversations/:id/messages", requireMembership, chatController.getMessages);
-router.post("/conversations/:id/messages", requireMembership, messageLimiter, chatController.sendMessage);
+router.get("/conversations/:id/threads/:rootId", requireMembership, chatController.getThread);
+
+// Pins (the chat's) and stars (mine): chat-features-plan.md CH-P
+const pinLimiter = require("../middlewares/rateLimiter.middleware").createLimiter({ windowMs: 60 * 1000, max: 30, message: "Too many pin changes." });
+router.get("/conversations/:id/pins", requireMembership, chatController.getPins);
+router.post("/conversations/:id/pins/:msgId", requireMembership, pinLimiter, chatController.pinMessage);
+router.delete("/conversations/:id/pins/:msgId", requireMembership, pinLimiter, chatController.unpinMessage);
+router.get("/starred", chatController.getStarred);
+
+// Customer experience (P4)
+router.get("/conversations/:id/service-info", requireMembership, chatController.getServiceInfo);
+router.post("/conversations/:id/team-notes", requireMembership, chatController.openTeamNotes);
+router.get("/conversations/:id/files", requireMembership, chatController.getFiles);
+// Scheduled send: the same per-person message limits as sending now
+router.get("/conversations/:id/scheduled", requireMembership, chatController.listScheduled);
+router.post("/conversations/:id/scheduled", requireMembership, messageLimiter, mentionLimiter, chatController.scheduleMessage);
+router.delete("/scheduled/:sid", chatController.cancelScheduled);
+router.post("/messages/:id/star", reactionLimiter, chatController.starMessage);
+router.delete("/messages/:id/star", reactionLimiter, chatController.unstarMessage);
+router.post("/conversations/:id/messages", requireMembership, messageLimiter, mentionLimiter, chatController.sendMessage);
 
 // Phase 2: File/image upload (pre-encrypted by client)
 router.post(

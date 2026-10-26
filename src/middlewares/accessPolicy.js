@@ -54,7 +54,19 @@ const CUSTOMER_CHAT_RULES = [
   rule("PATCH", `/chat/messages/${ID}/read`),
   rule("PATCH", `/chat/messages/${ID}/react`),
   rule("PATCH", `/chat/messages/${ID}/edit`),
-  rule("DELETE", `/chat/messages/${ID}`) // "delete for everyone" is refused in the controller
+  rule("DELETE", `/chat/messages/${ID}`), // "delete for everyone" is refused in the controller
+  // chat-features-plan.md: their own notification choice, threads, viewing pins
+  // (pinning stays staff-only: not listed, so refused), their own stars
+  rule("PATCH", `/chat/conversations/${ID}/notify`),
+  rule("GET", `/chat/conversations/${ID}/threads/${ID}`),
+  rule("GET", `/chat/conversations/${ID}/pins`),
+  rule("POST", `/chat/messages/${ID}/star`),
+  rule("DELETE", `/chat/messages/${ID}/star`),
+  rule("GET", "/chat/starred"),
+  // P4: the reply-time banner and the chat's shared files. Not team notes,
+  // scheduling or forwarding (staff features: not listed, so refused)
+  rule("GET", `/chat/conversations/${ID}/service-info`),
+  rule("GET", `/chat/conversations/${ID}/files`)
 ];
 
 const STAFF_CHAT_RULES = [rule("*", "/chat(/.*)?")];

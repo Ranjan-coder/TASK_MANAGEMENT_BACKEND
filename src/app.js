@@ -58,7 +58,9 @@ app.use(
     origin: config.clientUrl,
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"]
+    // If-None-Match: devices revalidate the moderation word list by ETag; without it
+    // the preflight failed and a cached list never picked up new terms
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "If-None-Match"]
   })
 );
 

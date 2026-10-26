@@ -300,3 +300,24 @@ test("customers need the customer portal for everything except signing in and ou
   expect(checkModuleAccess({ user: cust, originalUrl: "/api/v1/chat/conversations", orgMask: modulesCfg.effectiveMask(modulesCfg.toMask(["customer_portal", "chat"])) }).allowed).toBe(false);
   expect(checkModuleAccess({ user: cust, originalUrl: "/api/v1/chat/conversations", orgMask: portal }).allowed).toBe(true);
 });
+
+test("filing a report is org-wide: any staff member may flag a customer; reviewing still needs the grant", () => {
+  // A designer given only chat + projects (no "Reports and ratings")
+  const designer = { role: "user", moduleAccess: { keys: ["projects", "chat"] } };
+  const org = modulesCfg.effectiveMask(modulesCfg.toMask(["projects", "chat", "reports"]));
+  const gate = (url, orgMask = org, user = designer) => checkModuleAccess({ user, originalUrl: `/api/v1${url}`, orgMask });
+  // Regression: these used to be MODULE_NOT_GRANTED, so the Flag button failed for ordinary designers
+  expect(gate("/reports").allowed).toBe(true);
+  expect(gate("/reports/mine").allowed).toBe(true);
+  expect(gate("/reports/about-me").allowed).toBe(true);
+  expect(gate(`/reports/${SAMPLE_ID}/response`).allowed).toBe(true);
+  expect(gate("/ratings/me").allowed).toBe(true);
+  // The reviewer queue is not org-wide
+  expect(gate("/admin/reports")).toMatchObject({ allowed: false, code: "MODULE_NOT_GRANTED", module: "reports" });
+  // The organisation must still have the module, and its dependency (reports needs chat)
+  expect(gate("/reports", modulesCfg.effectiveMask(modulesCfg.toMask(["projects", "chat"])))).toMatchObject({ allowed: false, code: "MODULE_DISABLED" });
+  expect(gate("/reports", modulesCfg.toMask(["projects", "reports"])).allowed).toBe(false);
+  // Case/slash tricks can't reach the org-wide rule for another path
+  expect(gate("//REPORTS/")).toMatchObject({ allowed: true });
+  expect(gate("/reportsx").allowed).toBe(false);
+});

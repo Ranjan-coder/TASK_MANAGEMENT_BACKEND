@@ -174,7 +174,7 @@ const anonymiseCustomer = async (userId) => {
     if (conv.members.length < 2) conv.isArchived = true;
     await conv.save({ validateBeforeSave: false });
     try {
-      require("../sockets").getIO()?.in(`user:${userId}`).socketsLeave(`conv:${conv._id}`);
+      require("../sockets").getIO()?.in(`user:${userId}`).socketsLeave(require("./receipt.service").chatRooms(conv._id));
     } catch {
       /* socket layer optional */
     }

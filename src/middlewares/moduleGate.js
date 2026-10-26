@@ -1,5 +1,5 @@
 const modules = require("../config/modules");
-const { moduleForPath } = require("../config/moduleRoutes");
+const { moduleForPath, isOrgWidePath } = require("../config/moduleRoutes");
 const { normalisePath } = require("./accessPolicy");
 const { ROLES, PLATFORM_OWNER } = require("../config/roles");
 const { effectiveUserMask } = require("../services/moduleAccess.service");
@@ -33,6 +33,13 @@ const checkModuleAccess = ({ user, originalUrl, orgMask, customerMask = 0 }) => 
   }
   if (!(orgMask & modules.BIT[key])) {
     return deny("MODULE_DISABLED", `${modules.getModule(key).label} isn't available for your organisation.`, { module: key });
+  }
+  // Org-wide paths (e.g. filing a report): the organisation having the module is enough.
+  // Still subject to the dependency rule (reports needs chat), via the org's own mask.
+  if (isOrgWidePath(path)) {
+    return modules.effectiveMask(orgMask) & modules.BIT[key]
+      ? ALLOW
+      : deny("MODULE_DISABLED", `${modules.getModule(key).label} isn't available for your organisation.`, { module: key });
   }
   if (!(effectiveUserMask(user, orgMask, customerMask) & modules.BIT[key])) {
     return deny("MODULE_NOT_GRANTED", `You haven't been given access to ${modules.getModule(key).label}. Ask your superadmin.`, { module: key });

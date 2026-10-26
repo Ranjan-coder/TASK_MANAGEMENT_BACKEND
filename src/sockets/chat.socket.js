@@ -3,6 +3,7 @@ const logger = require("../utils/logger");
 const redisClient = require("../config/redis");
 const chatService = require("../services/chat.service");
 const { runAsAccount } = require("../services/accountLookup.service");
+const { markDelivered, teamRoom, customerRoom, chatRooms } = require("../services/receipt.service");
 
 // Typing debounce timers: Map<`${socketId}:${convId}`, NodeJS.Timeout>
 const typingTimers = new Map();
@@ -36,6 +37,21 @@ const emitPresence = async (io, userId, isOnline) => {
   }
 };
 
+const receiptBuckets = new Map(); // userId → { tokens, at } (this server; enough to stop floods)
+const allowReceipt = (userId) => {
+  const now = Date.now();
+  if (receiptBuckets.size > 20000) receiptBuckets.clear();
+  const b = receiptBuckets.get(userId) || { tokens: 60, at: now };
+  b.tokens = Math.min(60, b.tokens + ((now - b.at) / 60000) * 120);
+  b.at = now;
+  receiptBuckets.set(userId, b);
+  if (b.tokens < 1) return false;
+  b.tokens -= 1;
+  return true;
+};
+
+const isConvId = (v) => typeof v === "string" && /^[a-f0-9]{24}$/i.test(v);
+
 const inRoom = (socket, conversationId) => typeof conversationId === "string" && /^[a-f0-9]{24}$/i.test(conversationId) && socket.rooms.has(`conv:${conversationId}`);
 
 const setOnline = async (userId, io) => {
@@ -62,23 +78,33 @@ const setOffline = async (userId, io) => {
 const registerChatEvents = (socket, io) => {
   const userId = socket.user._id.toString();
 
+  // Receipt events: a token bucket per PERSON (120 per minute, bursts of 60), shared by
+  // all their connections, so opening many sockets doesn't multiply the write rate
+  const allow = () => allowReceipt(userId);
+
   // ── Join / Leave conversation room ─────────────────────────────────────────
-  socket.on("join:conversation", async ({ conversationId }) => {
+  socket.on("join:conversation", async ({ conversationId } = {}) => {
+    // A plain id only (an object here would reach the query as an operator)
+    if (!isConvId(conversationId)) return;
     try {
       // Verify membership before allowing room join
       const conv = await Conversation.exists({ _id: conversationId, "members.user": userId });
       if (!conv) {
         return socket.emit("chat:error", { code: "NOT_MEMBER", message: "Access denied to conversation" });
       }
-      socket.join(`conv:${conversationId}`);
+      // Plus the receipts room for this person's side: the team sees who read what,
+      // customers only that the team did (receipt.service.js, CH-D3)
+      const side = socket.user.role === "customer" ? customerRoom(conversationId) : teamRoom(conversationId);
+      socket.join([`conv:${conversationId}`, side]);
       logger.debug(`User ${socket.user.name} joined conv:${conversationId}`);
     } catch (err) {
       logger.error(`join:conversation error: ${err.message}`);
     }
   });
 
-  socket.on("leave:conversation", ({ conversationId }) => {
-    socket.leave(`conv:${conversationId}`);
+  socket.on("leave:conversation", ({ conversationId } = {}) => {
+    if (!isConvId(conversationId)) return;
+    for (const room of chatRooms(conversationId)) socket.leave(room);
   });
 
   // ── Typing indicators ──────────────────────────────────────────────────────
@@ -128,15 +154,31 @@ const registerChatEvents = (socket, io) => {
   // ── Read receipt via socket (alternative to REST) ──────────────────────────
   socket.on("chat:read", async ({ conversationId } = {}) => {
     if (!inRoom(socket, conversationId)) return;
+    if (!allow()) return;
     try {
+      // Receipt to the chat's open screens (team / customer views) happens inside
       await chatService.markAsRead(conversationId, userId);
-      socket.to(`conv:${conversationId}`).emit("chat:read", {
-        conversationId,
-        userId,
-        lastRead: new Date()
-      });
+      // My other tabs and devices clear their unread badge
+      io.to(`user:${userId}`).emit("chat:read", { conversationId, userId, lastRead: new Date() });
     } catch (err) {
       logger.error(`chat:read error: ${err.message}`);
+    }
+  });
+
+  // ── Delivered (✓✓): "my app has received this chat's messages up to t" ────
+  // One item or a list (after loading the conversation list). Membership is
+  // part of the update filter, so a non-member's event changes nothing.
+  socket.on("chat:delivered", async (payload) => {
+    const items = (Array.isArray(payload) ? payload : [payload]).slice(0, 50);
+    for (const item of items) {
+      const { conversationId, upTo } = item || {};
+      if (typeof conversationId !== "string" || !/^[a-f0-9]{24}$/i.test(conversationId) || typeof upTo !== "string") continue;
+      if (!allow()) return;
+      try {
+        await markDelivered(io, conversationId, userId, upTo);
+      } catch (err) {
+        logger.error(`chat:delivered error: ${err.message}`);
+      }
     }
   });
 
@@ -168,4 +210,21 @@ const registerChatEvents = (socket, io) => {
   };
 };
 
-module.exports = { registerChatEvents, setOnline };
+/**
+ * A group admin came online: chats of theirs where someone still has no key
+ * (or a removal needs a new key) get handled now by their app, instead of
+ * whenever they next open that chat.
+ */
+const requestPendingKeyHelp = async (userId, io) => {
+  const { requestKeyHelp } = require("../services/groupKeys.service");
+  const groups = await Conversation.find({ type: "group", members: { $elemMatch: { user: userId, role: "admin" } } })
+    .select("type members groupKeyring rekeyRequested")
+    .populate("members.user", "publicKey")
+    .limit(200)
+    .lean();
+  let asked = 0;
+  for (const g of groups) if (requestKeyHelp(io, g, userId)) asked++;
+  return asked;
+};
+
+module.exports = { registerChatEvents, setOnline, requestPendingKeyHelp };

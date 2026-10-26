@@ -89,4 +89,21 @@ const trie = createRouteTrie(MODULE_ROUTES);
 /** Module key for a normalised path (see accessPolicy.normalisePath), or null if unmapped. */
 const moduleForPath = (path) => trie.lookup(path);
 
-module.exports = { MODULE_ROUTES, moduleForPath };
+/**
+ * Paths that need the organisation to have their module, but not a personal
+ * grant. Reporting is a safety action: any designer in a project chat must be
+ * able to flag an abusive customer (and answer a report about them, and see
+ * their own rating), not only the people given "Reports and ratings" to review
+ * reports (/admin/reports stays granted). Who may report whom is checked by
+ * report.service (members of that project chat, customer ↔ staff only).
+ */
+const ORG_WIDE_ROUTES = ["/reports", "/ratings"];
+for (const p of ORG_WIDE_ROUTES) {
+  if (!moduleForPath(p)) throw new Error(`Org-wide route "${p}" isn't mapped to a module`);
+}
+const orgWideTrie = createRouteTrie(ORG_WIDE_ROUTES.map((p) => [p, true]));
+
+/** Same longest-prefix walk as moduleForPath: O(path segments). */
+const isOrgWidePath = (path) => orgWideTrie.lookup(path) === true;
+
+module.exports = { MODULE_ROUTES, moduleForPath, ORG_WIDE_ROUTES, isOrgWidePath };

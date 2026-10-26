@@ -26,6 +26,12 @@ const memberSchema = new mongoose.Schema(
     lastRead: {
       type: Date,
       default: null
+    },
+    // Latest message time this member's app has received (✓✓ ticks, CH-R).
+    // Only ever moved forward ($max), so late or repeated events can't undo it.
+    lastDelivered: {
+      type: Date,
+      default: null
     }
   },
   { _id: false }
@@ -146,6 +152,26 @@ const conversationSchema = new mongoose.Schema(
     // admin who created the project) or a member was removed: the next staff
     // member of the group who opens it replaces the key.
     rekeyRequested: { type: Boolean, default: false },
+
+    // Internal notes (P4): a staff-only chat linked to a project chat. Its own
+    // group key is never given to customers, so they can't read it even by
+    // accident. On the project chat: internalNotes → the notes chat;
+    // on the notes chat: internalFor → the project chat.
+    internalNotes: { type: mongoose.Schema.Types.ObjectId, ref: "Conversation", default: undefined },
+    internalFor: { type: mongoose.Schema.Types.ObjectId, ref: "Conversation", default: undefined },
+
+    // Pinned messages, newest first (chat-features-plan.md CH-P), at most 50
+    pins: {
+      type: [
+        {
+          message: { type: mongoose.Schema.Types.ObjectId, ref: "Message", required: true },
+          by: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+          at: { type: Date, default: Date.now },
+          _id: false
+        }
+      ],
+      default: undefined
+    },
     // Abuse alerts (project chats): flags are counted from countFrom; while an
     // incident is open no second alert is raised (cooldown)
     moderation: {
@@ -208,6 +234,8 @@ const conversationSchema = new mongoose.Schema(
 conversationSchema.index({ "members.user": 1 });
 conversationSchema.index({ type: 1, "members.user": 1 });
 conversationSchema.index({ lastActivityAt: -1 });
+// One team-notes chat per project chat (two staff opening it at once can't make two)
+conversationSchema.index({ internalFor: 1 }, { unique: true, partialFilterExpression: { internalFor: { $type: "objectId" } } });
 conversationSchema.index({ "project.status": 1, lastActivityAt: -1 }, { sparse: true });
 conversationSchema.index({ isArchived: 1, "members.user": 1 });
 // Customer Home, payments, monitoring and privacy all look projects up by customer
