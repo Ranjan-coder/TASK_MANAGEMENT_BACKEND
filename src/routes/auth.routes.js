@@ -1,5 +1,7 @@
 const express = require("express");
 const router = express.Router();
+// Sign-in starts without an organisation (see middlewares/publicTenant)
+router.use(require("../middlewares/publicTenant.middleware"));
 const authController = require("../controllers/auth.controller");
 const authMiddleware = require("../middlewares/auth.middleware");
 const validate = require("../middlewares/validate.middleware");
@@ -42,7 +44,9 @@ router.post("/reset-password/:token", authLimiter, validate(resetPasswordSchema)
 router.post("/2fa/setup", authMiddleware, authController.setup2FA);
 router.post("/2fa/enable", authMiddleware, authController.enable2FA);
 router.post("/2fa/disable", authMiddleware, authLimiter, validate(disable2FASchema), authController.disable2FA);
-router.post("/logout", authMiddleware, authController.logout);
+// No login check: signing out must work even when the session is already dead
+// (expired, revoked, account deleted). The controller reads the cookies itself.
+router.post("/logout", authController.logout);
 router.post(
   "/change-password",
   authLimiter,

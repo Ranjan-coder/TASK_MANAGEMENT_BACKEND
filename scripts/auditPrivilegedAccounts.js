@@ -52,7 +52,8 @@ const main = async () => {
   }
 };
 
-main()
+// Looks across every organisation (platform-level report)
+require("../src/utils/tenantContext").runAsSystem(main)
   .catch((err) => {
     console.error(`Audit failed: ${err.message}`);
     process.exitCode = 1;

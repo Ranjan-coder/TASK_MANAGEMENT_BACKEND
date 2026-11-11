@@ -1,4 +1,5 @@
 const express = require("express");
+const resumeTenant = require("../middlewares/tenantResume.middleware");
 const multer = require("multer");
 const controller = require("../controllers/report.controller");
 const authMiddleware = require("../middlewares/auth.middleware");
@@ -23,7 +24,7 @@ const reportLimiter = createLimiter({
 // Customers report staff; staff flag customers (their project chats only)
 const reportRoutes = express.Router();
 reportRoutes.use(authMiddleware, rbacMiddleware(...PROJECT_PEOPLE));
-reportRoutes.post("/", reportLimiter, screenshots.array("screenshots", 5), controller.createReport);
+reportRoutes.post("/", reportLimiter, resumeTenant(screenshots.array("screenshots", 5)), controller.createReport);
 reportRoutes.get("/mine", controller.listMine);
 reportRoutes.get("/about-me", controller.listAboutMe);
 reportRoutes.post("/:id/response", validate(v.respondSchema), controller.respond);

@@ -4,6 +4,7 @@ const Task = require("../models/Task");
 const Comment = require("../models/Comment");
 const Notification = require("../models/Notification");
 const cloudinary = require("../config/cloudinary");
+const { orgFolder } = require("../services/media.service");
 const { validateSafeUrl } = require("../utils/ssrfGuard");
 const { getIO } = require("../sockets");
 const ApiError = require("../utils/ApiError");
@@ -86,7 +87,7 @@ const uploadFile = asyncHandler(async (req, res) => {
         new Promise((resolve, reject) => {
           const stream = cloudinary.uploader.upload_stream(
             {
-              folder: `task_manager/${entityType}s`,
+              folder: orgFolder(`${entityType}s`),
               timeout: 60000,
               resource_type: fileType === "image" ? "image" : "raw",
               // Private: only reachable through the short-lived links the API hands to people on the task
@@ -374,7 +375,7 @@ const uploadAvatar = asyncHandler(async (req, res) => {
         new Promise((resolve, reject) => {
           const stream = cloudinary.uploader.upload_stream(
             {
-              folder: "task_manager/avatars",
+              folder: orgFolder("avatars"),
               timeout: 60000,
               transformation: [{ width: 300, height: 300, crop: "fill", gravity: "face" }],
               public_id: `avatar_${req.user._id}_${Date.now()}`

@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /**
  * A design sign-off in a project chat (R4): the designer asks for approval on
@@ -31,4 +32,5 @@ const designApprovalSchema = new mongoose.Schema(
 designApprovalSchema.index({ conversation: 1, createdAt: -1 });
 designApprovalSchema.index({ message: 1 }, { unique: true, partialFilterExpression: { status: "pending" }, name: "one_pending_per_message" });
 
+designApprovalSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("DesignApproval", designApprovalSchema);

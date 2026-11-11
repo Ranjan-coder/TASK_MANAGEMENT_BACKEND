@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /**
  * An abuse alert in a project chat: raised when flagged words sent with
@@ -34,4 +35,5 @@ moderationIncidentSchema.index({ status: 1, createdAt: -1 });
 moderationIncidentSchema.index({ conversation: 1, createdAt: -1 });
 moderationIncidentSchema.index({ createdAt: -1 });
 
+moderationIncidentSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("ModerationIncident", moderationIncidentSchema);

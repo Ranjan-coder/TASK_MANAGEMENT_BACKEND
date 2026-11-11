@@ -1,7 +1,9 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 const bcrypt = require("../utils/bcrypt");
-const { ALL_ROLES, ROLES } = require("../config/roles");
+const { ALL_ROLES, ROLES, PLATFORM_OWNER } = require("../config/roles");
 const { PERMISSION_KEYS, effectivePermissions } = require("../config/permissions");
+const { TOGGLEABLE_KEYS } = require("../config/modules");
 
 // One signed-in device. Each session owns exactly one refresh token (stored as
 // a hash), so removing the session signs that device out immediately.
@@ -28,7 +30,6 @@ const userSchema = new mongoose.Schema(
     email: {
       type: String,
       required: [true, "Email is required"],
-      unique: true,
       lowercase: true,
       trim: true,
       match: [/^\S+@\S+\.\S+$/, "Please use a valid email address"]
@@ -41,7 +42,7 @@ const userSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ALL_ROLES,
+      enum: [...ALL_ROLES, PLATFORM_OWNER],
       default: ROLES.USER
     },
     avatarUrl: {
@@ -65,6 +66,15 @@ const userSchema = new mongoose.Schema(
     reportsTo: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     // Add-on permissions granted by a superadmin (config/permissions.js)
     permissions: { type: [{ type: String, enum: PERMISSION_KEYS }], default: [] },
+    // Modules this person may use, granted by a superadmin (module-access-plan.md, Phase 4).
+    // all: true = every module the organisation has; null = the role's default
+    // (admins everything, other staff nothing); keys apply when all is false/null.
+    // version guards against two superadmins editing the same person at once.
+    moduleAccess: {
+      all: { type: Boolean, default: null },
+      keys: { type: [{ type: String, enum: TOGGLEABLE_KEYS }], default: [] },
+      version: { type: Number, default: 0 }
+    },
     status: {
       type: String,
       enum: ["active", "inactive", "suspended"],
@@ -243,15 +253,19 @@ const userSchema = new mongoose.Schema(
 );
 
 userSchema.index({ role: 1 });
+// Staff directory (services/directory.service.js): filter and name order in one index scan
+userSchema.index({ orgId: 1, status: 1, role: 1, name: 1, _id: 1 });
 userSchema.index({ status: 1 });
 userSchema.index({ departmentId: 1 });
 userSchema.index({ designationId: 1 });
 userSchema.index({ reportsTo: 1 });
-userSchema.index({ referralCode: 1 }, { unique: true, partialFilterExpression: { referralCode: { $type: "string" } } });
-userSchema.index(
-  { phone: 1 },
-  { unique: true, partialFilterExpression: { phone: { $type: "string" } } }
-);
+// Unique within an organisation: the same person may hold separate accounts in
+// several organisations (module-access-plan.md, M5)
+userSchema.index({ orgId: 1, email: 1 }, { unique: true });
+userSchema.index({ email: 1 }); // sign-in looks up every organisation first
+userSchema.index({ orgId: 1, referralCode: 1 }, { unique: true, partialFilterExpression: { referralCode: { $type: "string" } } });
+userSchema.index({ orgId: 1, phone: 1 }, { unique: true, partialFilterExpression: { phone: { $type: "string" } } });
+userSchema.index({ phone: 1 }, { partialFilterExpression: { phone: { $type: "string" } } });
 
 userSchema.pre("save", async function (next) {
   if (!this.isModified("password")) return next();
@@ -334,5 +348,7 @@ userSchema.set("toJSON", {
   }
 });
 
+// Product owners sit outside every organisation (orgId null); everyone else has one
+userSchema.plugin(tenantPlugin, { required: function () { return this.role !== PLATFORM_OWNER; } }); // one organisation per document (module-access-plan.md)
 const User = mongoose.model("User", userSchema);
 module.exports = User;

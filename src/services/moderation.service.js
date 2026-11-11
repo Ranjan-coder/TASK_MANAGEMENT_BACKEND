@@ -7,6 +7,7 @@ const Message = require("../models/Message");
 const User = require("../models/User");
 const Report = require("../models/Report");
 const ApiError = require("../utils/ApiError");
+const { createOrgCache } = require("../utils/orgCache");
 const logger = require("../utils/logger");
 const { normalizeTerm, SEVERITY_RANK } = require("../utils/moderationText");
 const { getSlaSettings, getEscalationRecipients } = require("./settings.service");
@@ -20,7 +21,7 @@ const SEED = require("../config/moderationLexicon.seed");
  */
 
 const WARNING_TEXT =
-  "⚠️ This conversation is moving towards abusive language. Please keep it respectful. This chat has been flagged for review by Bonito management.";
+  "⚠️ This conversation is moving towards abusive language. Please keep it respectful. This chat has been flagged for review by the management team.";
 const MAX_HITS_PER_MESSAGE = 20;
 const LEXICON_CACHE_MS = 60 * 1000;
 
@@ -63,8 +64,8 @@ const bumpStat = (field) =>
 
 // ── Word list ────────────────────────────────────────────────────────────────
 
-let lexiconCache = null;
-let lexiconAt = 0;
+// Each organisation has its own word list, cached per organisation
+const lexiconCache = createOrgCache({ ttlMs: LEXICON_CACHE_MS });
 
 const ensureSeeded = async () => {
   if (await ModerationTerm.exists({})) return;
@@ -85,20 +86,16 @@ const ensureSeeded = async () => {
 };
 
 /** The active word list for devices: { version, terms: [{ t, s }] }. */
-const getLexicon = async () => {
-  if (lexiconCache && Date.now() - lexiconAt < LEXICON_CACHE_MS) return lexiconCache;
-  await ensureSeeded();
-  const terms = await ModerationTerm.find({ active: true }).select("term severity").sort({ term: 1 }).lean();
-  const list = terms.map((t) => ({ t: t.term, s: t.severity }));
-  const version = crypto.createHash("sha256").update(JSON.stringify(list)).digest("base64url").slice(0, 16);
-  lexiconCache = { version, terms: list };
-  lexiconAt = Date.now();
-  return lexiconCache;
-};
+const getLexicon = () =>
+  lexiconCache.get(async () => {
+    await ensureSeeded();
+    const terms = await ModerationTerm.find({ active: true }).select("term severity").sort({ term: 1 }).lean();
+    const list = terms.map((t) => ({ t: t.term, s: t.severity }));
+    const version = crypto.createHash("sha256").update(JSON.stringify(list)).digest("base64url").slice(0, 16);
+    return { version, terms: list };
+  });
 
-const clearLexiconCache = () => {
-  lexiconCache = null;
-};
+const clearLexiconCache = () => lexiconCache.invalidate();
 
 const listTermsForAdmin = async () => {
   await ensureSeeded();
@@ -380,7 +377,7 @@ const requestEvidence = async (id, admin) => {
   await postNotice(
     conv._id,
     admin._id,
-    "Bonito management has asked anyone affected to report the messages concerned, using the ⚑ button above. Only the messages you choose are shared."
+    "The management team has asked anyone affected to report the messages concerned, using the ⚑ button above. Only the messages you choose are shared."
   );
   const { sendNotification } = require("./notification.service");
   await Promise.all(

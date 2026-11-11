@@ -3,9 +3,12 @@ const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
 const User = require("../models/User");
 const ApiError = require("../utils/ApiError");
+const { withoutMissingPeople } = require("../utils/presentPeople");
+const { forViewer } = require("../utils/chatPrivacy");
+const { currentOrgName } = require("./organisation.service");
 const logger = require("../utils/logger");
 const { ROLES } = require("../config/roles");
-const { buildInitialKeyring, dropMemberKeys } = require("./groupKeys.service");
+const { buildInitialKeyring, dropMemberKeys, requestKeyHelp } = require("./groupKeys.service");
 
 /**
  * Project chats: group conversations that Bonito admins set up for a customer
@@ -53,7 +56,7 @@ const resolveTeam = async ({ customerIds, leadDesignerId, backupDesignerId, mana
   }
   for (const id of staff) {
     const u = byId.get(id);
-    if (!u || !PROJECT_STAFF_ROLES.includes(u.role)) throw new ApiError(400, "Designers and managers must be Bonito staff accounts");
+    if (!u || !PROJECT_STAFF_ROLES.includes(u.role)) throw new ApiError(400, "Designers and managers must be staff accounts in your organisation");
     if (u.status !== "active") throw new ApiError(400, `${u.name}'s account is not active`);
   }
 
@@ -109,6 +112,12 @@ const createProject = async ({ actor, name, customerIds, leadDesignerId, backupD
   // rekeyRequested makes the team's first staff member replace it on open.
   const groupKeyring = buildInitialKeyring({ keys: encryptedGroupKeys, creatorId: actor._id, memberIdList: memberIds });
 
+  // The project follows the company's current workflow version from its first step (W6)
+  const wf = await require("../modules/workflows/workflow.service").currentCompiled();
+  const firstStage = wf.stages[0];
+  const now = new Date();
+  const firstDue = firstStage.durationDays ? new Date(now.getTime() + firstStage.durationDays * 24 * 60 * 60 * 1000) : null;
+
   const conversation = await Conversation.create({
     type: "group",
     name: name.trim(),
@@ -122,17 +131,29 @@ const createProject = async ({ actor, name, customerIds, leadDesignerId, backupD
       leadDesigner: leadDesignerId,
       backupDesigner: backupDesignerId || null,
       manager: managerId || null,
-      createdBy: actor._id
+      createdBy: actor._id,
+      stage: firstStage.key,
+      flow: {
+        versionId: wf.versionId,
+        version: wf.version,
+        stepKey: wf.firstStepKey,
+        enteredAt: now,
+        stageEnteredAt: now,
+        dueAt: firstDue
+      }
     }
   });
 
-  await postSystemMessage(conversation._id, actor._id, `Bonito created this project chat for ${name.trim()}.`);
+  await postSystemMessage(conversation._id, actor._id, `${await currentOrgName("Your team")} created this project chat for ${name.trim()}.`);
   const populated = await populateProject(Conversation.findById(conversation._id));
 
-  emit((io) => memberIds.forEach((uid) => io.to(`user:${uid}`).emit("conversation:created", populated)));
+  // Per person: customers don't see the team's individual read times (CH-D3)
+  emit((io) => memberIds.forEach((uid) => io.to(`user:${uid}`).emit("conversation:created", forViewer(populated, uid))));
+  // The creating admin isn't a member: ask the team's admins to replace its key now
+  emit((io) => requestKeyHelp(io, conversation));
   notifyUsers(team.customers, {
     title: "Your project chat is ready",
-    message: `Chat with your Bonito design team about "${name.trim()}" in Chat.`
+    message: `Chat with your design team about "${name.trim()}" in Chat.`
   });
   notifyUsers(team.staff, {
     title: "You've been added to a project",
@@ -199,18 +220,50 @@ const updateProject = async (id, { actor, name, status, customerIds, leadDesigne
   for (const text of notices) await postSystemMessage(conversation._id, actor._id, text);
   const populated = await populateProject(Conversation.findById(conversation._id));
 
+  // Team notes follow the staff (P4): people taken off the project lose them at once
+  // A failure here would leave removed staff in the notes: try again, then report it loudly
+  const { syncTeamNotes } = require("./customerChat.service");
+  let notesSync = null;
+  try {
+    notesSync = await syncTeamNotes(conversation);
+  } catch (err) {
+    try {
+      notesSync = await syncTeamNotes(await Conversation.findById(conversation._id));
+    } catch (err2) {
+      logger.error(`SECURITY: team notes of project ${conversation._id} not synced after a team change: ${err2.message} (first: ${err.message})`);
+    }
+  }
+  if (notesSync?.notesId) {
+    const notesConv = await Conversation.findById(notesSync.notesId).populate("members.user", "name avatarUrl status publicKey keyVersion");
+    emit((io) => {
+      for (const uid of notesSync.removed) {
+        io.in(`user:${uid}`).socketsLeave(require("./receipt.service").chatRooms(notesSync.notesId));
+        io.to(`user:${uid}`).emit("chat:member:removed", { conversationId: notesSync.notesId, userId: uid });
+      }
+      for (const uid of notesSync.added) io.to(`user:${uid}`).emit("conversation:created", withoutMissingPeople(notesConv));
+      requestKeyHelp(io, notesConv); // new staff need the notes key; removals need a new one
+    });
+  }
+
+  // New people need the key; after a removal it must be replaced. Ask the admins' apps now.
+  emit((io) => requestKeyHelp(io, conversation));
+
   emit((io) => {
     // Removed people stop receiving this chat's live events immediately
     removed.forEach((uid) => {
-      io.in(`user:${uid}`).socketsLeave(`conv:${id}`);
+      io.in(`user:${uid}`).socketsLeave(require("./receipt.service").chatRooms(id));
       io.to(`user:${uid}`).emit("chat:member:removed", { conversationId: id, userId: uid });
     });
-    added.forEach((uid) => io.to(`user:${uid}`).emit("conversation:created", populated));
-    io.to(`conv:${id}`).emit("chat:project:updated", populated);
+    added.forEach((uid) => io.to(`user:${uid}`).emit("conversation:created", forViewer(populated, uid)));
+    // Per member rather than to the room: each gets the copy they may see (CH-D3)
+    for (const m of populated?.members || []) {
+      const uid = String(m.user?._id || m.user);
+      io.to(`user:${uid}`).emit("chat:project:updated", forViewer(populated, uid));
+    }
   });
   const addedCustomers = added.filter((u) => team.customers.includes(u));
   if (addedCustomers.length) {
-    notifyUsers(addedCustomers, { title: "Your project chat is ready", message: `Chat with your Bonito design team about "${conversation.name}".` });
+    notifyUsers(addedCustomers, { title: "Your project chat is ready", message: `Chat with your design team about "${conversation.name}".` });
   }
   const addedStaff = added.filter((u) => !team.customers.includes(u));
   if (addedStaff.length) {
@@ -229,16 +282,31 @@ const updateProject = async (id, { actor, name, status, customerIds, leadDesigne
 // ── Read ──────────────────────────────────────────────────────────────────────
 
 // The list screen never needs the chat key rings (they grow with every rekey and member)
-const listProjects = async ({ status } = {}) => {
+const listProjects = async ({ status, stage } = {}) => {
   const filter = { project: { $exists: true } };
   if (status) filter["project.status"] = status;
-  return populateProject(Conversation.find(filter).select("-groupKeyring -groupKeys").sort({ lastActivityAt: -1 }).limit(500));
+  // Older projects have no stage stored and count as the first stage
+  if (stage) filter["project.stage"] = stage === "consultation" ? { $in: [stage, null] } : stage;
+  const list = await populateProject(Conversation.find(filter).select("-groupKeyring -groupKeys").sort({ lastActivityAt: -1 }).limit(500));
+  // Each project's workflow view, so the list draws every card without a request per
+  // project. Versions come from the in-memory cache (few distinct ones), so this is
+  // O(projects) work in memory, no extra queries.
+  const workflows = require("../modules/workflows/workflow.service");
+  const nav = require("../modules/workflows/engine/navigate");
+  const { stateOf } = require("../modules/workflows/projectFlow.service");
+  return Promise.all(
+    list.map(async (doc) => {
+      const json = withoutMissingPeople(doc); // people whose account is gone are left out
+      const c = await workflows.compiledForProject(json.project);
+      return { ...json, flowView: { version: c.version, ...nav.staffView(c, stateOf(json.project, c)) } };
+    })
+  );
 };
 
 const getProject = async (id) => {
   const project = await populateProject(Conversation.findOne({ _id: id, project: { $exists: true } }));
   if (!project) throw new ApiError(404, "Project not found");
-  return project;
+  return withoutMissingPeople(project);
 };
 
 module.exports = { createProject, updateProject, listProjects, getProject, ROLE_LABELS, PROJECT_STAFF_ROLES };

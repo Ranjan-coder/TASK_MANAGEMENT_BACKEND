@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /** A customer's request to delete their account and personal data (DPDP Act, R8). */
 const deletionRequestSchema = new mongoose.Schema(
@@ -18,4 +19,5 @@ const deletionRequestSchema = new mongoose.Schema(
 deletionRequestSchema.index({ user: 1 }, { unique: true, partialFilterExpression: { status: "pending" }, name: "one_pending_request" });
 deletionRequestSchema.index({ status: 1, createdAt: 1 });
 
+deletionRequestSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("DeletionRequest", deletionRequestSchema);

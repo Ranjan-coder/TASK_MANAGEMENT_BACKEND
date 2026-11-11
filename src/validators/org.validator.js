@@ -60,6 +60,18 @@ const updateDesignationSchema = z.object({
     .refine((b) => Object.keys(b).length > 0, "Nothing to update")
 });
 
+// The product owner's standard list: departments have no head (people belong to organisations)
+const templateDepartmentCreateSchema = z.object({
+  body: z.object({ name: orgName, description: z.string().trim().max(300).optional() }).strict()
+});
+const templateDepartmentUpdateSchema = z.object({
+  params: idParams,
+  body: z
+    .object({ name: orgName.optional(), description: z.string().trim().max(300).optional(), isActive: z.boolean().optional() })
+    .strict()
+    .refine((b) => Object.keys(b).length > 0, "Nothing to update")
+});
+
 const idOnlySchema = z.object({ params: idParams });
 const mergeSchema = z.object({ params: idParams, body: z.object({ into: id }).strict() });
 const reorderSchema = z.object({ body: z.object({ ids: z.array(id).min(1).max(500) }).strict() });
@@ -77,7 +89,36 @@ const permissionsSchema = z.object({
     .strict()
 });
 
+const objectId = z.string().regex(/^[a-f0-9]{24}$/i, "Invalid id");
+const moduleKey = z.enum(require("../config/modules").TOGGLEABLE_KEYS);
+
+// Phase 4: give one module to many people, or take it away
+const moduleMembersSchema = z.object({
+  params: z.object({ key: moduleKey }).strict(),
+  body: z
+    .object({ add: z.array(objectId).max(200).optional(), remove: z.array(objectId).max(200).optional() })
+    .strict()
+    .refine((b) => (b.add?.length || 0) + (b.remove?.length || 0) > 0, { message: "Choose at least one person" })
+});
+
+// Phase 4: one person's modules (all = every module the organisation has)
+const userModulesSchema = z.object({
+  params: z.object({ id: objectId }).strict(),
+  body: z.object({ all: z.boolean().nullable().optional(), keys: z.array(moduleKey).max(32).optional() }).strict()
+});
+
+// Phase (planner): open a staff-only module to customers
+const moduleCustomersSchema = z.object({
+  params: z.object({ key: moduleKey }).strict(),
+  body: z.object({ enabled: z.boolean() }).strict()
+});
+
 module.exports = {
+  templateDepartmentCreateSchema,
+  templateDepartmentUpdateSchema,
+  moduleCustomersSchema,
+  moduleMembersSchema,
+  userModulesSchema,
   id,
   listSchema,
   createDepartmentSchema,

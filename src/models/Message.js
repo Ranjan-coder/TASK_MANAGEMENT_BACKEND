@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 const attachmentSchema = new mongoose.Schema(
   {
@@ -6,9 +7,11 @@ const attachmentSchema = new mongoose.Schema(
     originalName: { type: String, required: true },
     fileType: {
       type: String,
-      enum: ["pdf", "doc", "docx", "xls", "xlsx", "image", "other"],
+      enum: ["pdf", "doc", "docx", "xls", "xlsx", "image", "audio", "other"],
       required: true
     },
+    // Voice notes: length in seconds (the audio itself is encrypted)
+    durationSec: { type: Number, min: 1, max: 600, default: undefined },
     mimeType: { type: String, default: "application/octet-stream" },
     fileSize: { type: Number, default: 0 },
     url: { type: String, required: true },          // Cloudinary URL (encrypted file stored here)
@@ -114,7 +117,31 @@ const messageSchema = new mongoose.Schema(
       default: null
     },
 
+    // Threads (chat-features-plan.md CH-T): a reply in a thread points at its
+    // root message. One level only. Thread replies stay out of the main chat
+    // unless the sender also posted them there (alsoInChat).
+    threadRoot: { type: mongoose.Schema.Types.ObjectId, ref: "Message", default: null },
+    alsoInChat: { type: Boolean, default: undefined },
+    // On a root message: kept up to date atomically as replies arrive
+    threadReplyCount: { type: Number, default: undefined, min: 0 },
+    threadLastReplyAt: { type: Date, default: undefined },
+    threadParticipants: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], default: undefined },
+
+    // Shown as "Forwarded" (P4). The text was re-encrypted for this chat by the sender's app.
+    forwarded: { type: Boolean, default: undefined },
+
     reactions: [reactionSchema],
+
+    // Random id the sender's app gives the message before sending, so a retry
+    // after a dropped connection returns the saved copy instead of a duplicate
+    // (chat-features-plan.md CH-Q). Unique per sender.
+    clientMsgId: { type: String, default: undefined, maxlength: 64 },
+
+    // @mentions (chat-features-plan.md CH-M). The text stays encrypted; the
+    // sender's app lists who it mentions so the server can notify them.
+    // Checked on send: current members only, never the sender, at most 50.
+    mentions: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], default: undefined },
+    mentionsAll: { type: String, enum: ["everyone", "here"], default: undefined },
 
     isEdited: { type: Boolean, default: false },
     editedAt: { type: Date, default: null },
@@ -132,6 +159,16 @@ const messageSchema = new mongoose.Schema(
 messageSchema.index({ conversation: 1, createdAt: -1 });
 messageSchema.index({ sender: 1 });
 messageSchema.index({ conversation: 1, isDeleted: 1 });
+// A thread's replies, in order
+messageSchema.index({ conversation: 1, threadRoot: 1, createdAt: -1 }, { partialFilterExpression: { threadRoot: { $type: "objectId" } } });
+// "Jump to mention": messages in a chat that mention someone, newest first
+messageSchema.index({ conversation: 1, mentions: 1, createdAt: -1 }, { partialFilterExpression: { mentions: { $exists: true } } });
+// Idempotent sends: one message per (sender, clientMsgId); older messages have none
+messageSchema.index(
+  { sender: 1, clientMsgId: 1 },
+  { unique: true, partialFilterExpression: { clientMsgId: { $type: "string" } } }
+);
 
+messageSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 const Message = mongoose.model("Message", messageSchema);
 module.exports = Message;

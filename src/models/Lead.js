@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /** A customer asked for a consultation from a campaign's call-to-action. */
 const leadSchema = new mongoose.Schema(
@@ -28,4 +29,5 @@ leadSchema.index({ status: 1, createdAt: -1 });
 leadSchema.index({ customer: 1, createdAt: -1 });
 leadSchema.index({ campaign: 1, createdAt: -1 });
 
+leadSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("Lead", leadSchema);

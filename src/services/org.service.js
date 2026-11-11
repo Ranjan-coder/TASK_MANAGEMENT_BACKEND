@@ -6,7 +6,8 @@ const ApiError = require("../utils/ApiError");
 const logger = require("../utils/logger");
 const { orgKey } = require("../utils/orgKey");
 const { ROLES, STAFF_ROLES } = require("../config/roles");
-const { DEPARTMENTS, DESIGNATIONS } = require("../config/orgSeed");
+const { createOrgCache } = require("../utils/orgCache");
+const { SYNCED } = require("../models/OrgTemplate");
 
 /**
  * Departments and designations (managed lists), plus the rules for assigning them.
@@ -21,41 +22,26 @@ const TTL_MS = 30 * 1000;
 const SUPERADMIN_ONLY_LEVEL = 2; // levels 1–2 (board, CXO) are assigned by a superadmin only
 const MAX_CHAIN = 50; // reports-to walk limit (guards against bad data)
 
-let snap = null;
-let snapAt = 0;
-let loading = null; // single flight: concurrent requests share one load
-let seeded = false;
+// Per-organisation snapshot (LRU-bounded Map<orgId, snapshot>, single flight per org)
+const cache = createOrgCache({ ttlMs: TTL_MS });
+const seededOrgs = new Set(); // organisations whose lists exist (checked once per process)
 
 const oid = (v) => new mongoose.Types.ObjectId(String(v));
 const sid = (v) => (v ? String(v) : null);
 
-// ── Seed (first run only) ─────────────────────────────────────────────────────
+// ── Seed (first use per organisation) ─────────────────────────────────────────────────────
 
-const ensureSeeded = async () => {
-  if (seeded) return;
-  const [d, g] = await Promise.all([Department.estimatedDocumentCount(), Designation.estimatedDocumentCount()]);
+// A new organisation starts from the product owner's standard list (orgTemplate.service),
+// linked, so later product-owner changes reach it too
+const ensureSeeded = async (orgId) => {
+  if (seededOrgs.has(String(orgId))) return;
+  const [d, g] = await Promise.all([Department.countDocuments(), Designation.countDocuments()]);
   if (d === 0 && g === 0) {
     // ordered:false + unique keys make a race between two servers harmless
-    await Department.insertMany(
-      DEPARTMENTS.map((name, i) => ({ name, key: orgKey(name), sortOrder: i })),
-      { ordered: false }
-    ).catch((err) => err.code !== 11000 && Promise.reject(err));
-    const deptIdByName = new Map((await Department.find().select("name").lean()).map((x) => [x.name, x._id]));
-    await Designation.insertMany(
-      DESIGNATIONS.map(([name, short, level, suggestedRole, depts], i) => ({
-        name,
-        key: orgKey(name),
-        short,
-        level,
-        suggestedRole,
-        departments: depts.map((n) => deptIdByName.get(n)).filter(Boolean),
-        sortOrder: i
-      })),
-      { ordered: false }
-    ).catch((err) => err.code !== 11000 && Promise.reject(err));
-    logger.info(`[Org] Seeded ${DEPARTMENTS.length} departments and ${DESIGNATIONS.length} designations`);
+    const n = await require("./orgTemplate.service").seedCurrentOrg();
+    logger.info(`[Org] Seeded ${n.departments} departments and ${n.designations} designations from the standard list`);
   }
-  seeded = true;
+  seededOrgs.add(String(orgId));
 };
 
 // ── Snapshot ──────────────────────────────────────────────────────────────────
@@ -75,28 +61,19 @@ const build = (departments, designations) => {
   };
 };
 
-const load = async () => {
-  if (snap && Date.now() - snapAt < TTL_MS) return snap;
-  if (!loading) {
-    loading = (async () => {
-      await ensureSeeded();
-      const [departments, designations] = await Promise.all([
-        Department.find().sort({ sortOrder: 1, name: 1 }).lean(),
-        Designation.find().sort({ level: 1, sortOrder: 1, name: 1 }).lean()
-      ]);
-      snap = build(departments, designations);
-      snapAt = Date.now();
-      return snap;
-    })().finally(() => {
-      loading = null;
-    });
-  }
-  return loading;
-};
+const load = () =>
+  cache.get(async (orgId) => {
+    await ensureSeeded(orgId);
+    const [departments, designations] = await Promise.all([
+      Department.find().sort({ sortOrder: 1, name: 1 }).lean(),
+      Designation.find().sort({ level: 1, sortOrder: 1, name: 1 }).lean()
+    ]);
+    return build(departments, designations);
+  });
 
-const invalidate = () => {
-  snap = null;
-};
+const invalidate = () => cache.invalidate();
+/** Every organisation's snapshot (a product-owner change reaches many at once). */
+const clearAll = () => cache.clear();
 
 // ── Read ──────────────────────────────────────────────────────────────────────
 
@@ -107,6 +84,9 @@ const publicDept = (d, counts, heads) => ({
   isActive: d.isActive,
   sortOrder: d.sortOrder,
   head: d.head ? heads?.get(sid(d.head)) || { _id: d.head } : null,
+  // From the product owner's standard list; `customised` = fields this organisation changed
+  standard: Boolean(d.templateId),
+  customised: d.overrides || [],
   ...(counts && { userCount: counts.get(sid(d._id)) || 0 })
 });
 
@@ -119,6 +99,8 @@ const publicDesig = (g, counts) => ({
   suggestedRole: g.suggestedRole,
   isActive: g.isActive,
   sortOrder: g.sortOrder,
+  standard: Boolean(g.templateId),
+  customised: g.overrides || [],
   ...(counts && { userCount: counts.get(sid(g._id)) || 0 })
 });
 
@@ -226,9 +208,21 @@ const updateItem = async (kind, actor, id, patch) => {
   }
   if (patch.departments !== undefined) set.departments = await validDeptIds(patch.departments);
 
+  // A standard item: the fields changed here become this organisation's own, so
+  // later product-owner changes to them don't overwrite this edit
+  const update = { $set: set };
+  if (before.templateId) {
+    const own = SYNCED[kind].filter((f) =>
+      f === "departments"
+        ? set.departments !== undefined && [...set.departments.map(sid)].sort().join() !== [...(before.departments || []).map(sid)].sort().join()
+        : set[f] !== undefined && (before[f] ?? null) !== (set[f] ?? null)
+    );
+    if (own.length) update.$addToSet = { overrides: { $each: own } };
+  }
+
   let after;
   try {
-    after = await models[kind].findByIdAndUpdate(id, { $set: set }, { new: true }).lean();
+    after = await models[kind].findByIdAndUpdate(id, update, { new: true }).lean();
   } catch (err) {
     if (err.code === 11000) throw new ApiError(409, `${label(kind)} "${patch.name}" already exists`, [{ code: "ORG_NAME_TAKEN" }]);
     throw err;
@@ -242,6 +236,31 @@ const updateItem = async (kind, actor, id, patch) => {
     const [idField, nameField] = userField[kind];
     const r = await User.updateMany({ [idField]: oid(id) }, { $set: { [nameField]: set.name } });
     usersRenamed = r.modifiedCount;
+  }
+  return { before, after, usersRenamed };
+};
+
+/**
+ * "Reset to standard": takes the product owner's current values again and drops
+ * this organisation's own changes, so future product-owner changes reach it.
+ */
+const resetItem = async (kind, actor, id) => {
+  const s = await load();
+  const before = byId(s, kind).get(String(id));
+  if (!before) throw new ApiError(404, `${label(kind)} not found`);
+  const values = await require("./orgTemplate.service").standardValues(kind, before);
+  const set = { updatedBy: actor._id, overrides: [] };
+  for (const f of SYNCED[kind]) set[f] = values[f];
+  if (values.name !== before.name) {
+    await assertNameFree(kind, values.name, id);
+    set.key = values.key;
+  }
+  const after = await models[kind].findByIdAndUpdate(id, { $set: set }, { new: true }).lean();
+  invalidate();
+  let usersRenamed = 0;
+  if (values.name !== before.name) {
+    const [idField, nameField] = userField[kind];
+    usersRenamed = (await User.updateMany({ [idField]: oid(id) }, { $set: { [nameField]: values.name } })).modifiedCount;
   }
   return { before, after, usersRenamed };
 };
@@ -496,6 +515,8 @@ const getTeam = async (userId) => teamOf(await loadGraph(), userId);
 module.exports = {
   load,
   invalidate,
+  clearAll,
+  resetItem,
   listDepartments,
   listDesignations,
   createDepartment,

@@ -3,6 +3,8 @@ const ProjectFinance = require("../models/ProjectFinance");
 const User = require("../models/User");
 const ApiError = require("../utils/ApiError");
 const logger = require("../utils/logger");
+const { requireOrgId } = require("../utils/tenantContext");
+const { currentOrgName } = require("./organisation.service");
 const { nextSequence } = require("../models/Counter");
 const media = require("./media.service");
 const { getSlaSettings, getEscalationRecipients } = require("./settings.service");
@@ -83,7 +85,7 @@ const paymentDetails = async () => {
   const { settings } = await getSlaSettings();
   const p = settings.payments || {};
   return {
-    companyName: p.companyName || "Bonito Interiors",
+    companyName: p.companyName || (await currentOrgName("")),
     upiId: p.upiId || "",
     bankName: p.bankName || "",
     accountName: p.accountName || "",
@@ -153,7 +155,7 @@ const getReceipt = async ({ conversationId, milestoneId, viewer }) => {
   return {
     receiptNo: m.paid.receiptNo,
     issuedAt: m.paid.confirmedAt,
-    company: { name: p.companyName || "Bonito Interiors", address: p.companyAddress || "", gstin: p.gstin || "" },
+    company: { name: p.companyName || (await currentOrgName("")), address: p.companyAddress || "", gstin: p.gstin || "" },
     customerNames: customers.map((c) => c.name),
     projectName: conv.name,
     milestone: m.title,
@@ -218,8 +220,18 @@ const adminList = async ({ filter }) => {
 
 const adminGet = async (conversationId) => {
   const conv = await loadProject(conversationId);
-  const f = await ProjectFinance.findOne({ conversation: conversationId }).populate("milestones.paid.confirmedBy", "name").lean();
-  return { projectId: conv._id, projectName: conv.name, finance: f ? { ...f, summary: summarise(f) } : null };
+  const [f, flowConv] = await Promise.all([
+    ProjectFinance.findOne({ conversation: conversationId }).populate("milestones.paid.confirmedBy", "name").lean(),
+    Conversation.findById(conversationId).select("project.flow project.stage").lean()
+  ]);
+  // The project's workflow stages, so a payment line can fall due at one (E4)
+  const c = await require("../modules/workflows/workflow.service").compiledForProject(flowConv?.project);
+  return {
+    projectId: conv._id,
+    projectName: conv.name,
+    finance: f ? { ...f, summary: summarise(f) } : null,
+    stages: c.stages.map((s) => ({ key: s.key, name: s.name, current: s.key === flowConv?.project?.stage }))
+  };
 };
 
 /**
@@ -243,9 +255,17 @@ const saveSchedule = async ({ conversationId, admin, contractValuePaise, gstRate
   const total = milestones.reduce((a, m) => a + m.amountPaise, 0);
   if (total > contractValuePaise) throw new ApiError(400, `The milestones add up to ${rupees(total)}, more than the contract value ${rupees(contractValuePaise)}`);
 
+  // A line linked to a stage must name a stage of this project's workflow (E4)
+  if (milestones.some((x) => x.stageKey)) {
+    const conv = await Conversation.findById(conversationId).select("project.flow project.stage").lean();
+    const c = await require("../modules/workflows/workflow.service").compiledForProject(conv?.project);
+    for (const x of milestones) if (x.stageKey && !c.stageIndex.has(x.stageKey)) throw new ApiError(400, `"${x.title}" is linked to a stage this project doesn't have`);
+  }
+
   const next = milestones.map((x) => {
     const old = x._id ? existing.get(x._id) : null;
     if (old) {
+      if (x.stageKey !== undefined) old.stageKey = x.stageKey || null;
       old.title = x.title;
       old.amountPaise = x.amountPaise;
       if (+new Date(old.dueDate || 0) !== +new Date(x.dueDate || 0)) {
@@ -255,7 +275,7 @@ const saveSchedule = async ({ conversationId, admin, contractValuePaise, gstRate
       }
       return old;
     }
-    return { title: x.title, amountPaise: x.amountPaise, dueDate: x.dueDate || null };
+    return { title: x.title, amountPaise: x.amountPaise, dueDate: x.dueDate || null, stageKey: x.stageKey || null };
   });
 
   const removed = [...existing.values()].filter((m) => !milestones.some((x) => x._id === String(m._id)));
@@ -303,7 +323,10 @@ const confirmPayment = async ({ conversationId, milestoneId, admin, method, refe
     message: `${rupees(amountPaise)} for "${m.title}" (${conv.name}). Receipt ${receiptNo} is in Payments.`
   });
   // A friend's first payment qualifies the referral
-  await require("./referrals.service").onFirstPayment(conv.project.customers, conv.project.customers).catch((err) => logger.warn(`Referral check failed: ${err.message}`));
+  // Referral rewards only where the organisation has the referrals module
+  if (await require("./organisation.service").orgHasModule(requireOrgId(), "referrals")) {
+    await require("./referrals.service").onFirstPayment(conv.project.customers, conv.project.customers).catch((err) => logger.warn(`Referral check failed: ${err.message}`));
+  }
   return { receiptNo, ...(await adminGet(conversationId)) };
 };
 

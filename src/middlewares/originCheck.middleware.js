@@ -37,7 +37,7 @@ const originCheck = (req, res, next) => {
   const source = origin && origin !== "null" ? originOf(origin) : req.headers.referer ? originOf(req.headers.referer) : origin === "null" ? "null" : null;
   if (source === null) return next();
   if (allowed.has(source)) return next();
-  return next(new ApiError(403, "Request blocked: it didn't come from the Bonito app.", [{ code: "BAD_ORIGIN" }]));
+  return next(new ApiError(403, "Request blocked: it didn't come from this app.", [{ code: "BAD_ORIGIN" }]));
 };
 
 module.exports = originCheck;

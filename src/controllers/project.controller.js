@@ -4,7 +4,12 @@ const projectService = require("../services/project.service");
 const { recordAuditLog } = require("../services/audit.service");
 
 const listProjects = asyncHandler(async (req, res) => {
-  res.status(200).json(new ApiResponse(200, await projectService.listProjects({ status: req.query.status })));
+  res.status(200).json(new ApiResponse(200, await projectService.listProjects({ status: req.query.status, stage: req.query.stage })));
+});
+
+/** GET /admin/projects/stages — projects per stage (pipeline). */
+const stageCounts = asyncHandler(async (req, res) => {
+  res.status(200).json(new ApiResponse(200, await require("../services/projectExtras.service").stageCounts({ status: req.query.status })));
 });
 
 const getProject = asyncHandler(async (req, res) => {
@@ -35,4 +40,4 @@ const updateProject = asyncHandler(async (req, res) => {
   res.status(200).json(new ApiResponse(200, project, "Project updated"));
 });
 
-module.exports = { listProjects, getProject, createProject, updateProject };
+module.exports = { listProjects, stageCounts, getProject, createProject, updateProject };

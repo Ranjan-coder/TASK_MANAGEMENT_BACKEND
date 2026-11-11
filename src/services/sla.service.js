@@ -103,7 +103,7 @@ const onMessage = async ({ conversation, sender, now = new Date() }) => {
 const startWaiting = async (conversation, customer, now) => {
   if (await ChatSla.exists({ conversation: conversation._id, open: true })) return; // clock already running
 
-  const { hours, sla } = await getSlaSettings();
+  const { hours, sla, settings } = await getSlaSettings();
   const working = hoursUtil.isWorkingTime(now, hours);
   const clockStart = working ? now : hoursUtil.nextWorkingStart(now, hours);
   if (!clockStart) return; // no working days configured
@@ -138,10 +138,14 @@ const startWaiting = async (conversation, customer, now) => {
     if (!recent) {
       const { lead } = await loadTeam(conversation);
       const who = lead ? firstName(lead.name) : "Your designer";
+      // The organisation's own away message if it set one (chat-features-plan.md P4); the
+      // reply time is always added so it stays accurate whatever the text says
+      const when = `${who} will reply ${hoursUtil.describeWhen(clockStart, now, hours)}.`;
+      const away = String(settings?.awayMessage || "").trim();
       await postNotice(
         conversation._id,
         conversation.project.leadDesigner,
-        `Thanks for your message! Our team is available ${hoursUtil.describeHours(hours)}. ${who} will reply ${hoursUtil.describeWhen(clockStart, now, hours)}.`
+        away ? `${away} ${when}` : `Thanks for your message! Our team is available ${hoursUtil.describeHours(hours)}. ${when}`
       );
     }
   }

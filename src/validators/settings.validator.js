@@ -41,6 +41,7 @@ const updateSettingsSchema = z.object({
         .optional()
         .transform((list) => (list ? [...new Map(list.map((h) => [h.date, h])).values()].sort((a, b) => a.date.localeCompare(b.date)) : list)),
       sla: sla.optional(),
+      awayMessage: cleanStr(300).optional(),
       escalationContacts: z.array(id).max(20).optional(),
       payments: z
         .object({

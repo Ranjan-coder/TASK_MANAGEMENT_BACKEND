@@ -1,5 +1,5 @@
 const config = require("../config/env");
-const { ROLES, PRIVILEGED_ROLES } = require("../config/roles");
+const { ROLES, PRIVILEGED_ROLES, PLATFORM_OWNER } = require("../config/roles");
 const { permissionRules } = require("../config/permissions");
 
 /**
@@ -20,6 +20,11 @@ const rule = (method, pattern) => ({ method, regex: new RegExp(`^${pattern}$`) }
 // Always reachable by any authenticated user, even while other gates apply
 // (so a user can log out, see who they are, change password, set up 2FA).
 const AUTH_RULES = [rule("*", "/auth(/.*)?")];
+
+// Changing the password re-encrypts the person's own key backup with the new
+// password, so reading that (already encrypted) backup is part of changing the
+// password: allowed during a forced password change and for every role.
+const PASSWORD_CHANGE_RULES = [rule("GET", "/chat/keys/bundle")];
 
 const NOTIFICATION_RULES = [
   rule("GET", "/notifications"),
@@ -49,7 +54,19 @@ const CUSTOMER_CHAT_RULES = [
   rule("PATCH", `/chat/messages/${ID}/read`),
   rule("PATCH", `/chat/messages/${ID}/react`),
   rule("PATCH", `/chat/messages/${ID}/edit`),
-  rule("DELETE", `/chat/messages/${ID}`) // "delete for everyone" is refused in the controller
+  rule("DELETE", `/chat/messages/${ID}`), // "delete for everyone" is refused in the controller
+  // chat-features-plan.md: their own notification choice, threads, viewing pins
+  // (pinning stays staff-only: not listed, so refused), their own stars
+  rule("PATCH", `/chat/conversations/${ID}/notify`),
+  rule("GET", `/chat/conversations/${ID}/threads/${ID}`),
+  rule("GET", `/chat/conversations/${ID}/pins`),
+  rule("POST", `/chat/messages/${ID}/star`),
+  rule("DELETE", `/chat/messages/${ID}/star`),
+  rule("GET", "/chat/starred"),
+  // P4: the reply-time banner and the chat's shared files. Not team notes,
+  // scheduling or forwarding (staff features: not listed, so refused)
+  rule("GET", `/chat/conversations/${ID}/service-info`),
+  rule("GET", `/chat/conversations/${ID}/files`)
 ];
 
 const STAFF_CHAT_RULES = [rule("*", "/chat(/.*)?")];
@@ -80,6 +97,8 @@ const CUSTOMER_PAYMENT_RULES = [
 // Customer extras: project timeline, answering design approvals, testimonials
 const CUSTOMER_PROJECT_RULES = [
   rule("GET", "/projects/mine"),
+  // Their project's contacts (membership is checked by projectContacts.service)
+  rule("GET", `/projects/${ID}/contacts`),
   rule("GET", `/chat/conversations/${ID}/approvals`),
   rule("POST", `/chat/approvals/${ID}/decision`),
   rule("GET", "/testimonials")
@@ -114,6 +133,11 @@ const CONTENT_MANAGE_RULES = [
   rule("POST", "/admin/media")
 ];
 
+// Planner (notes, todos, reminders, meetings). Whether a person may use it is
+// decided by the module gate (on by default for staff; customers only if their
+// organisation opened it), so the allow-lists just don't block it.
+const PLANNER_RULES = [rule("*", "/planner(/.*)?")];
+
 // Departments, designations, org chart and "my team" (read only; staff)
 const ORG_VIEW_RULES = [
   rule("GET", "/org/departments"),
@@ -122,7 +146,13 @@ const ORG_VIEW_RULES = [
   rule("GET", "/org/team")
 ];
 
+// The product owner's console. Organisation business routes are never reachable
+// for this role (and its queries are scoped to orgId null anyway).
+const PLATFORM_RULES = [rule("*", "/platform(/.*)?")];
+const PUSH_RULES = [rule("GET", "/push/vapid-key"), rule("POST", "/push/subscribe"), rule("DELETE", "/push/subscribe")];
+
 const ROLE_ALLOW_LISTS = Object.freeze({
+  [PLATFORM_OWNER]: [...AUTH_RULES, ...PASSWORD_CHANGE_RULES, ...NOTIFICATION_RULES, ...PUSH_RULES, ...PLATFORM_RULES],
   [ROLES.CUSTOMER]: [
     ...AUTH_RULES,
     ...NOTIFICATION_RULES,
@@ -133,7 +163,8 @@ const ROLE_ALLOW_LISTS = Object.freeze({
     ...MODERATION_CLIENT_RULES,
     ...CUSTOMER_PROJECT_RULES,
     ...PERSONAL_RULES,
-    ...CUSTOMER_PAYMENT_RULES
+    ...CUSTOMER_PAYMENT_RULES,
+    ...PLANNER_RULES
   ],
   [ROLES.MARKETING]: [
     ...AUTH_RULES,
@@ -144,7 +175,8 @@ const ROLE_ALLOW_LISTS = Object.freeze({
     ...PERSONAL_RULES,
     ...CONTENT_VIEW_RULES,
     ...CONTENT_MANAGE_RULES,
-    ...ORG_VIEW_RULES
+    ...ORG_VIEW_RULES,
+    ...PLANNER_RULES
   ],
   // Read-only oversight. Its dashboards, payments, projects and leads screens come
   // from the permissions the role implies (config/permissions.js ROLE_IMPLIED).
@@ -155,7 +187,8 @@ const ROLE_ALLOW_LISTS = Object.freeze({
     ...STAFF_CHAT_RULES,
     ...MODERATION_CLIENT_RULES,
     ...PERSONAL_RULES,
-    ...ORG_VIEW_RULES
+    ...ORG_VIEW_RULES,
+    ...PLANNER_RULES
   ]
 });
 
@@ -192,7 +225,7 @@ const evaluateAccess = ({ user, method, originalUrl }) => {
   const path = normalisePath(originalUrl);
 
   // Gate 1: forced password change (e.g. seeded accounts)
-  if (user.mustChangePassword && !matches(AUTH_RULES, httpMethod, path)) {
+  if (user.mustChangePassword && !matches([...AUTH_RULES, ...PASSWORD_CHANGE_RULES], httpMethod, path)) {
     return deny("PASSWORD_CHANGE_REQUIRED", "You must change your password before continuing.");
   }
 
@@ -203,7 +236,7 @@ const evaluateAccess = ({ user, method, originalUrl }) => {
     (PRIVILEGED_ROLES.includes(user.role) || extraRules.length > 0) &&
     !user.isTwoFactorEnabled &&
     isPrivileged2FAEnforced() &&
-    !matches([...AUTH_RULES, ...PROFILE_RULES], httpMethod, path)
+    !matches([...AUTH_RULES, ...PASSWORD_CHANGE_RULES, ...PROFILE_RULES], httpMethod, path)
   ) {
     return deny("TWO_FACTOR_REQUIRED", "Two-factor authentication must be enabled for this account.");
   }

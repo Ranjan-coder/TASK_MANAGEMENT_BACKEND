@@ -58,7 +58,9 @@ app.use(
     origin: config.clientUrl,
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"]
+    // If-None-Match: devices revalidate the moderation word list by ETag; without it
+    // the preflight failed and a cached list never picked up new terms
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "If-None-Match"]
   })
 );
 
@@ -121,6 +123,9 @@ app.use("/api/v1/ratings", ratingRoutes);
 app.use("/api/v1/admin", adminContentRoutes);
 app.use("/api/v1/customer/auth", customerAuthRoutes);
 app.use("/api/v1/org", require("./routes/org.routes"));
+app.use("/api/v1/platform", require("./routes/platform.routes")); // product owner only
+// Packaged modules (backend/src/modules/*): each mounts its own router
+require("./modules").mountAll(app);
 app.use("/api/v1/users", userRoutes);
 app.use("/api/v1/tasks", taskRoutes);
 app.use("/api/v1", commentRoutes);

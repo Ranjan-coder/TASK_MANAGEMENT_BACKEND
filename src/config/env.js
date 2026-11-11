@@ -3,6 +3,9 @@ dotenv.config();
 
 const config = {
   env: process.env.NODE_ENV || "development",
+  // The product's name. Organisations with the branding module show their own
+  // display name instead (organisation.service brandNameOf).
+  appName: (process.env.APP_NAME || "Serenx").trim(),
   port: parseInt(process.env.PORT, 10) || 5000,
   mongoUri: process.env.MONGO_URI || "mongodb://localhost:27017/taskmanager",
   redisUrl: process.env.REDIS_URL || "redis://localhost:6379",

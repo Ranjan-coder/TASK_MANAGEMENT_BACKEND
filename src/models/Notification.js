@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 const notificationSchema = new mongoose.Schema(
   {
@@ -20,6 +21,7 @@ const notificationSchema = new mongoose.Schema(
         "task_status_changed",
         "comment_added",
         "mentioned",
+        "thread_reply", // chat thread followers (generic text: messages are end-to-end encrypted)
         "due_date_reminder",
         "task_completed",
         "account_created",
@@ -32,7 +34,12 @@ const notificationSchema = new mongoose.Schema(
         "rating_alert",
         "moderation_alert",
         "attachment_added",
-        "link_added"
+        "link_added",
+        // Planner (wording is generic: the content is end-to-end encrypted)
+        "planner_reminder",
+        "meeting_invite",
+        "meeting_updated",
+        "meeting_cancelled"
       ],
       required: true
     },
@@ -76,5 +83,6 @@ const notificationSchema = new mongoose.Schema(
 notificationSchema.index({ recipient: 1, isRead: 1, createdAt: -1 });
 notificationSchema.index({ recipient: 1, createdAt: -1 }); // the main list (all, newest first)
 
+notificationSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 const Notification = mongoose.model("Notification", notificationSchema);
 module.exports = Notification;

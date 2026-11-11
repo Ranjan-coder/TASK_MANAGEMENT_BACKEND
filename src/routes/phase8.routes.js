@@ -28,6 +28,73 @@ projectRoutes.patch(
   })
 );
 
+// ── /projects/:id/flow — the company's workflow on one project (project-workflow-plan.md §7) ──
+const flow = () => require("../modules/workflows/projectFlow.service");
+const flowRoute = (method, path, schema, action, run) =>
+  projectRoutes[method](
+    path,
+    rbacMiddleware(...STAFF),
+    validate(schema),
+    asyncHandler(async (req, res) => {
+      const view = await run(req);
+      await recordAuditLog({ req, action, targetType: "System", targetId: req.params.id, metadata: { ...req.body, ...(view.move && { move: view.move }) } });
+      ok(res, view, "Updated");
+    })
+  );
+
+// Read: chat members, admins, stage handlers, "view projects" holders (leadership included)
+projectRoutes.get(
+  "/:id/flow",
+  rbacMiddleware(...STAFF, "leadership"),
+  validate(v.idParams),
+  asyncHandler(async (req, res) => ok(res, await flow().viewFor(req.params.id, req.user)))
+);
+flowRoute("patch", "/:id/step", v.stepMoveSchema, "project_step_moved", (req) => flow().move({ conversationId: req.params.id, actor: req.user, ...req.body }));
+flowRoute("post", "/:id/flow/activate", v.stepPathSchema, "project_step_activated", (req) => flow().activate({ conversationId: req.params.id, actor: req.user, ...req.body }));
+flowRoute("post", "/:id/flow/deactivate", v.stepPathSchema, "project_step_deactivated", (req) =>
+  flow().deactivate({ conversationId: req.params.id, actor: req.user, path: req.body.path })
+);
+flowRoute("post", "/:id/flow/tick", v.tickSchema, "project_step_ticked", (req) => flow().tick({ conversationId: req.params.id, actor: req.user, ...req.body }));
+flowRoute("post", "/:id/flow/extras", v.extraAddSchema, "project_extra_added", (req) => flow().addExtra({ conversationId: req.params.id, actor: req.user, ...req.body }));
+flowRoute("patch", "/:id/flow/extras/:extraId", v.extraUpdateSchema, "project_extra_updated", (req) =>
+  flow().updateExtra({ conversationId: req.params.id, actor: req.user, extraId: req.params.extraId, action: req.body.action })
+);
+flowRoute("post", "/:id/flow/checklist", v.checklistSchema, "project_checklist_ticked", (req) => flow().checklist({ conversationId: req.params.id, actor: req.user, ...req.body }));
+
+// ── /projects/:id/contacts — who the customer contacts about what (project-contacts-plan.md) ──
+const contacts = () => require("../services/projectContacts.service");
+const contactsLimiter = require("../middlewares/rateLimiter.middleware").createLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  message: "Too many changes. Please try again later."
+});
+// Read: the chat's members (customers included) and admins — checked in the service
+projectRoutes.get("/:id/contacts", rbacMiddleware("customer", ...STAFF), validate(v.idParams), asyncHandler(async (req, res) => ok(res, await contacts().getProjectContacts(req.params.id, req.user))));
+// Edit: admins and the project's manager (P1) — checked in the service
+projectRoutes.put(
+  "/:id/contacts",
+  rbacMiddleware(...STAFF),
+  contactsLimiter,
+  validate(v.projectContactsSchema),
+  asyncHandler(async (req, res) => {
+    const view = await contacts().setProjectContacts({ conversationId: req.params.id, actor: req.user, ...req.body });
+    await recordAuditLog({
+      req,
+      action: "project_contacts_updated",
+      targetType: "System",
+      targetId: req.params.id,
+      metadata: { contacts: req.body.contacts.map((c) => ({ topic: c.topic, label: c.label, user: c.user })) }
+    });
+    ok(res, view, "Contacts saved");
+  })
+);
+projectRoutes.get(
+  "/:id/contacts/candidates",
+  rbacMiddleware(...STAFF),
+  validate(v.contactCandidatesSchema),
+  asyncHandler(async (req, res) => ok(res, await contacts().projectCandidates(req.params.id, req.user, req.query.search)))
+);
+
 // ── /chat approvals (R4) — mounted on the chat router's paths ────────────────
 const approvalRoutes = express.Router();
 approvalRoutes.use(authMiddleware);

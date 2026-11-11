@@ -34,7 +34,7 @@ const REASON_LABELS = {
 // What the person who filed the report is told (no HR details)
 const PUBLIC_OUTCOME = {
   submitted: "Received — we'll review it within 48 hours.",
-  under_review: "Being reviewed by the Bonito team.",
+  under_review: "Being reviewed by the team.",
   action_taken: "Reviewed — action has been taken.",
   dismissed: "Reviewed — no further action was needed."
 };
@@ -95,7 +95,7 @@ const createReport = async ({ reporter, conversationId, reportedUserId, reason, 
   } else if (STAFF_ROLES.includes(reporter.role) && reported.role === ROLES.CUSTOMER && isCustomer(reported._id)) {
     direction = "staff_to_customer";
   } else {
-    throw new ApiError(400, "Customers can report Bonito staff, and staff can flag customers, in their project chats.");
+    throw new ApiError(400, "Customers can report staff, and staff can flag customers, in their project chats.");
   }
   if (!REASONS[direction].includes(reason)) throw new ApiError(400, "Choose one of the listed reasons");
 
@@ -211,14 +211,26 @@ const respond = async ({ reportId, user, text }) => {
 
 const PERSON = "name email phone role avatarUrl designation status";
 
+/**
+ * The admin queue. Reports that involve the viewing admin (they filed it or
+ * it's about them) are left out — someone else must handle those.
+ *
+ * The tab counts used to come from a separate, unfiltered count, so a tab
+ * could say "1" over an empty list (e.g. a customer the admin flagged
+ * themselves). Now one $facet pass over the same filtered set gives both the
+ * per-status counts and how many reports here involve the viewer, so the
+ * page can explain what it isn't showing.
+ */
 const listForAdmin = async ({ status, direction, page = 1, limit = 30, viewer }) => {
   limit = Math.min(Math.max(Number(limit) || 30, 1), 100);
   page = Math.max(Number(page) || 1, 1);
-  // Reports that involve the viewing admin are left out of their queue
-  const q = viewer ? { reporter: { $ne: viewer._id }, reportedUser: { $ne: viewer._id } } : {};
-  if (status) q.status = status;
-  if (direction) q.direction = direction;
-  const [items, total, counts] = await Promise.all([
+  const me = viewer ? new mongoose.Types.ObjectId(String(viewer._id)) : null;
+  const notMine = me ? { reporter: { $ne: me }, reportedUser: { $ne: me } } : {};
+  const mine = me ? { $or: [{ reporter: me }, { reportedUser: me }] } : null;
+  const scope = direction ? { direction } : {}; // what both the tabs and the list are filtered by
+  const q = { ...scope, ...notMine, ...(status ? { status } : {}) };
+
+  const [items, total, [facets]] = await Promise.all([
     Report.find(q)
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
@@ -229,13 +241,23 @@ const listForAdmin = async ({ status, direction, page = 1, limit = 30, viewer })
       .populate("conversation", "name project.status")
       .lean(),
     Report.countDocuments(q),
-    Report.aggregate([{ $group: { _id: "$status", n: { $sum: 1 } } }])
+    Report.aggregate([
+      { $match: scope },
+      {
+        $facet: {
+          counts: [{ $match: notMine }, { $group: { _id: "$status", n: { $sum: 1 } } }],
+          involved: mine ? [{ $match: { ...mine, ...(status ? { status } : {}) } }, { $count: "n" }] : [{ $limit: 0 }]
+        }
+      }
+    ])
   ]);
   return {
     items: items.map((r) => ({ ...r, reasonLabel: REASON_LABELS[r.reason], evidenceCount: (r.evidenceMessages || []).length, attachmentCount: (r.attachments || []).length })),
     total,
     page,
-    counts: Object.fromEntries(counts.map((c) => [c._id, c.n]))
+    counts: Object.fromEntries((facets?.counts || []).map((c) => [c._id, c.n])),
+    // Reports in this view that involve the viewer (hidden from them; another admin handles them)
+    involvedHidden: facets?.involved?.[0]?.n || 0
   };
 };
 

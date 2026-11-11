@@ -1,4 +1,5 @@
 const express = require("express");
+const resumeTenant = require("../middlewares/tenantResume.middleware");
 const multer = require("multer");
 
 const content = require("../controllers/content.controller");
@@ -40,7 +41,10 @@ const mediaUpload = multer({
 const adminContentRoutes = express.Router();
 adminContentRoutes.use(authMiddleware, rbacMiddleware(...content.CONTENT_MANAGERS));
 
-adminContentRoutes.post("/media", uploadLimiter, mediaUpload.single("file"), content.uploadContentMedia);
+adminContentRoutes.post("/media", uploadLimiter, resumeTenant(mediaUpload.single("file")), content.uploadContentMedia);
+// Campaign videos go from the browser straight to Cloudinary (media.service.js)
+adminContentRoutes.post("/media/video-ticket", uploadLimiter, validate(v.videoTicketSchema), content.createVideoTicket);
+adminContentRoutes.post("/media/video-finish", uploadLimiter, validate(v.videoFinishSchema), content.finishVideo);
 
 adminContentRoutes.get("/campaigns", content.listCampaigns);
 adminContentRoutes.post("/campaigns", validate(v.createCampaignSchema), content.createCampaign);

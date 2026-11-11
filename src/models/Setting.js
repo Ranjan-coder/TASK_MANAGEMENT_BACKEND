@@ -1,4 +1,6 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
+const { projectContactSchema } = require("./subschemas/projectContact");
 
 /**
  * App-wide settings (one document, key "global"): business hours for the
@@ -14,7 +16,7 @@ const holidaySchema = new mongoose.Schema(
 
 const settingSchema = new mongoose.Schema(
   {
-    key: { type: String, required: true, unique: true, default: "global" },
+    key: { type: String, required: true, default: "global" },
     businessHours: {
       start: { type: String, default: "10:00", match: /^\d{2}:\d{2}$/ },
       end: { type: String, default: "19:00", match: /^\d{2}:\d{2}$/ },
@@ -23,6 +25,9 @@ const settingSchema = new mongoose.Schema(
       utcOffsetMinutes: { type: Number, default: 330 } // IST
     },
     holidays: { type: [holidaySchema], default: [] },
+    // Posted in project chats when a customer writes outside business hours
+    // (the expected reply time is added automatically). Empty = the default text.
+    awayMessage: { type: String, trim: true, maxlength: 300, default: "" },
     sla: {
       autoReplyMin: { type: Number, default: 15 },
       remindMin: { type: Number, default: 60 },
@@ -52,13 +57,19 @@ const settingSchema = new mongoose.Schema(
     },
     referrals: {
       enabled: { type: Boolean, default: true },
-      referrerReward: { type: String, trim: true, maxlength: 120, default: "₹5,000 off your next Bonito order" },
+      referrerReward: { type: String, trim: true, maxlength: 120, default: "₹5,000 off your next order" },
       friendReward: { type: String, trim: true, maxlength: 120, default: "₹2,000 off their first project" },
       terms: { type: String, trim: true, maxlength: 600, default: "The reward is given once your friend's project starts and their first payment is received." }
     },
+    // Company-wide project contacts (P2), e.g. one payments contact for every
+    // project; a project's own contacts replace these topic by topic
+    projectContacts: { type: [projectContactSchema], default: [] },
+    projectContactsRev: { type: Number, default: 0 },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null }
   },
   { timestamps: true }
 );
 
+settingSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
+settingSchema.index({ orgId: 1, key: 1 }, { unique: true }); // one settings document per organisation
 module.exports = mongoose.model("Setting", settingSchema);

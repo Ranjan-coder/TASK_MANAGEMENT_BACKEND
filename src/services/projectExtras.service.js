@@ -14,15 +14,9 @@ const { PROJECT_STAGES } = Conversation;
  * approvals (R4) and quick-reply templates (R5).
  */
 
-const STAGE_LABELS = {
-  consultation: "Consultation",
-  site_measurement: "Site measurement",
-  design: "Design",
-  quotation: "Quotation",
-  production: "Production",
-  installation: "Installation",
-  handover: "Handover"
-};
+const stages = require("../config/projectStages");
+
+const STAGE_LABELS = stages.LABELS;
 const ADMIN_ROLES = [ROLES.ADMIN, ROLES.SUPERADMIN];
 const STAFF_ROLES = [ROLES.USER, ROLES.ADMIN, ROLES.SUPERADMIN];
 const idStr = (v) => (v ? String(v._id || v) : null);
@@ -67,56 +61,104 @@ const loadProject = async (conversationId) => {
 // ── R1: status timeline ──────────────────────────────────────────────────────
 
 const timelineView = (project) => ({
-  stage: project.stage || "consultation",
-  stageHistory: (project.stageHistory || []).map((h) => ({ stage: h.stage, at: h.at, note: h.note || "" })),
+  // Company workflows have their own stage keys, so no fixed-list lookup here
+  stage: project.stage || stages.FIRST,
+  stageHistory: (project.stageHistory || []).map((h) => ({ stage: h.stage, step: h.step || null, from: h.from || null, kind: h.kind || null, at: h.at, note: h.note || "" })),
   expectedHandover: project.expectedHandover || null
 });
 
-/** Lead/backup designer, project manager or an admin moves the project to a stage. */
-const setStage = async ({ conversationId, actor, stage, note = "", expectedHandover }) => {
+/**
+ * Older "set stage" calls (whole stages). Moves go through the company's workflow
+ * (modules/workflows/projectFlow.service.js: rules, handlers, gates, race-proof
+ * writes); a note or expected handover date alone is saved here.
+ */
+const setStage = async ({ conversationId, actor, stage, from, note = "", expectedHandover }) => {
+  const flow = require("../modules/workflows/projectFlow.service");
   const conv = await loadProject(conversationId);
-  if (!ADMIN_ROLES.includes(actor.role) && !(isTeamLead(conv, actor._id) && isMember(conv, actor._id))) {
-    throw new ApiError(403, "Only the project's designers, manager or an admin can update the stage");
+  const current = conv.project.stage || stages.FIRST;
+  if (from && from !== current) {
+    throw new ApiError(409, "Someone just moved this project. Check and try again.", [{ code: "STAGE_CHANGED", stage: current }]);
   }
-  if (!PROJECT_STAGES.includes(stage)) throw new ApiError(400, "Unknown stage");
-  const changed = stage !== (conv.project.stage || "consultation");
-  if (!changed && expectedHandover === undefined && !note) throw new ApiError(400, "Nothing to update");
-
-  if (changed) {
-    conv.project.stage = stage;
-    conv.project.stageHistory.push({ stage, at: new Date(), by: actor._id, note });
-  } else if (note) {
-    conv.project.stageHistory.push({ stage, at: new Date(), by: actor._id, note });
+  let moved = null;
+  if (stage !== current) {
+    moved = await flow.moveToStage({ conversationId, actor, stage, from: current, note });
+  } else {
+    if (expectedHandover === undefined && !note) throw new ApiError(400, "Nothing to update");
+    const role = await flow.roleFor(actor, conv, null);
+    if (!role) throw new ApiError(403, "Only the project's designers, manager or an admin can update the stage");
   }
-  if (expectedHandover !== undefined) conv.project.expectedHandover = expectedHandover;
-  conv.markModified("project");
-  await conv.save();
-
-  if (changed) {
-    const label = STAGE_LABELS[stage];
-    await postNotice(conv._id, actor._id, `📍 Project stage: ${label}${note ? ` — ${note}` : ""}`);
-    await notify(conv.project.customers, { title: `Your project is now at: ${label}`, message: `"${conv.name}"${note ? ` — ${note}` : ""}`, relatedConversation: conv._id });
+  if (expectedHandover !== undefined || (!moved && note)) {
+    await Conversation.updateOne(
+      { _id: conv._id },
+      {
+        ...(expectedHandover !== undefined && { $set: { "project.expectedHandover": expectedHandover } }),
+        ...(!moved && note && { $push: { "project.stageHistory": { $each: [{ stage: current, kind: "note", at: new Date(), by: actor._id, note }], $slice: -500 } } })
+      }
+    );
   }
-  const view = { conversationId: String(conv._id), ...timelineView(conv.project) };
-  emit((io) => io.to(`conv:${conv._id}`).emit("chat:project:stage", view));
+  const updated = await Conversation.findById(conv._id).select("name project").lean();
+  const view = { conversationId: String(conv._id), status: updated.project.status, ...timelineView(updated.project), move: moved?.move || "same", from: current };
+  if (!moved) emit((io) => io.to(`conv:${conv._id}`).emit("chat:project:stage", { conversationId: view.conversationId, expectedHandover: view.expectedHandover }));
   return view;
+};
+
+/**
+ * How many projects are at each stage (one grouped query), for the admin pipeline.
+ * Columns follow the company's current workflow; projects still on an older
+ * version at a stage that no longer exists are counted under that stage's key.
+ */
+const stageCounts = async ({ status } = {}) => {
+  const workflows = require("../modules/workflows/workflow.service");
+  const [rows, c] = await Promise.all([
+    Conversation.aggregate([
+      { $match: { project: { $exists: true, $ne: null }, ...(status && { "project.status": status }) } },
+      { $group: { _id: { $ifNull: ["$project.stage", stages.FIRST] }, n: { $sum: 1 } } }
+    ]),
+    workflows.currentCompiled()
+  ]);
+  const byStage = new Map(rows.map((r) => [r._id, r.n]));
+  const out = c.stages.map((s) => ({ stage: s.key, label: s.name, count: byStage.get(s.key) || 0 }));
+  for (const [key, n] of byStage) if (!c.stageIndex.has(key)) out.push({ stage: key, label: `${key} (older version)`, count: n, older: true });
+  return out;
 };
 
 /** The customer's projects with their timelines (for Home). */
 const listMyProjects = async (customerId) => {
   const convs = await Conversation.find({ "project.customers": customerId, "members.user": customerId })
-    .select("name project lastActivityAt")
+    .select("name project lastActivityAt members.user")
     .populate("project.leadDesigner", "name avatarUrl")
     .sort({ lastActivityAt: -1 })
     .lean();
-  return convs.map((c) => ({
-    _id: c._id,
-    name: c.name,
-    status: c.project.status,
-    leadDesigner: c.project.leadDesigner ? { name: c.project.leadDesigner.name, avatarUrl: c.project.leadDesigner.avatarUrl } : null,
-    lastActivityAt: c.lastActivityAt,
-    ...timelineView(c.project)
-  }));
+  const [views, contacts] = await Promise.all([
+    require("../modules/workflows/projectFlow.service").customerViews(convs),
+    // Who to contact about what (P4): every project at once — one settings read, one people query
+    require("./projectContacts.service").contactsForMany(convs)
+  ]);
+  return convs.map((c) => {
+    const t = timelineView(c.project);
+    return {
+      _id: c._id,
+      name: c.name,
+      status: c.project.status,
+      leadDesigner: c.project.leadDesigner ? { name: c.project.leadDesigner.name, avatarUrl: c.project.leadDesigner.avatarUrl } : null,
+      lastActivityAt: c.lastActivityAt,
+      ...t,
+      // Only what was meant for the customer: internal sub-stage moves, ticks and
+      // checklists (and their staff notes) stay with the team
+      stageHistory: t.stageHistory.filter(customerFacing),
+      // The company's own stages, as the customer should see them
+      flow: views.get(String(c._id)),
+      contacts: contacts.get(String(c._id)) || []
+    };
+  });
+};
+
+/** History entries a customer may see: stage changes and what they were told about. */
+const CUSTOMER_KINDS = new Set(["activate", "deactivate", "extra", "extra_done", "note"]);
+const customerFacing = (h) => {
+  if (!h.kind || CUSTOMER_KINDS.has(h.kind)) return true; // older entries: always stage changes
+  if (["next", "back", "jump", "migrate"].includes(h.kind)) return !h.from || String(h.from).split("/")[0] !== h.stage; // a different stage
+  return false; // tick, untick, checklist: internal
 };
 
 // ── R4: design approvals ─────────────────────────────────────────────────────
@@ -129,7 +171,7 @@ const approvalEvent = (approval) =>
 
 const requestApproval = async ({ conversationId, actor, messageId, title }) => {
   const conv = await loadProject(conversationId);
-  if (!isMember(conv, actor._id) || !STAFF_ROLES.includes(actor.role)) throw new ApiError(403, "Only the Bonito team in this chat can ask for approval");
+  if (!isMember(conv, actor._id) || !STAFF_ROLES.includes(actor.role)) throw new ApiError(403, "Only the design team in this chat can ask for approval");
   const message = await Message.findOne({ _id: messageId, conversation: conv._id });
   if (!message || message.isDeleted) throw new ApiError(404, "Message not found");
   if (!["image", "file"].includes(message.type) || !message.attachments?.length) throw new ApiError(400, "Ask for approval on a design you've posted (an image or file)");
@@ -258,6 +300,7 @@ const deleteQuickReply = async (user, id) => {
 module.exports = {
   STAGE_LABELS,
   setStage,
+  stageCounts,
   listMyProjects,
   timelineView,
   requestApproval,
@@ -268,5 +311,7 @@ module.exports = {
   listQuickReplies,
   createQuickReply,
   updateQuickReply,
-  deleteQuickReply
+  deleteQuickReply,
+  // Shared with modules/workflows (stage moves post the same notices and events)
+  _helpers: { postNotice, notify, emit, loadProject, isTeamLead, isMember, isProjectCustomer, ADMIN_ROLES }
 };

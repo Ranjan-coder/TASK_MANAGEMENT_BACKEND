@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 const attachmentSchema = new mongoose.Schema(
   {
@@ -74,5 +75,6 @@ attachmentSchema.set("toJSON", {
 attachmentSchema.index({ "relatedTo.entityType": 1, "relatedTo.entityId": 1 });
 attachmentSchema.index({ uploadedBy: 1 });
 
+attachmentSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 const Attachment = mongoose.model("Attachment", attachmentSchema);
 module.exports = Attachment;

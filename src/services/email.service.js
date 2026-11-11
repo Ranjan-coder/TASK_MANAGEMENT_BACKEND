@@ -21,7 +21,7 @@ const sendEmail = async ({ to, subject, html }) => {
   try {
     if (process.env.NODE_ENV === "test") return;
     const info = await transporter.sendMail({
-      from: process.env.EMAIL_FROM || '"Bonito Interiors" <noreply@bonito.in>',
+      from: process.env.EMAIL_FROM || '"Notifications" <noreply@bonito.in>',
       to,
       subject,
       html

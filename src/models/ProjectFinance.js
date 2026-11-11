@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const tenantPlugin = require("./plugins/tenant.plugin");
 
 /**
  * Payment schedule for one project (R9). Amounts are whole paise (integers)
@@ -23,6 +24,9 @@ const milestoneSchema = new mongoose.Schema({
   title: { type: String, required: true, trim: true, maxlength: 80 },
   amountPaise: { type: Number, required: true, min: 1 },
   dueDate: { type: Date, default: null },
+  // Linked to a workflow stage (project-workflow-plan.md E4/E3): falls due when the
+  // project enters that stage, and a "payment" gate waits for it
+  stageKey: { type: String, match: /^[a-z][a-z0-9_]{1,39}$/, default: null },
   // upcoming → (customer says paid) verifying → paid; or waived by an admin
   status: { type: String, enum: ["upcoming", "verifying", "paid", "waived"], default: "upcoming" },
   claim: { type: claimSchema, default: undefined },
@@ -58,4 +62,5 @@ const projectFinanceSchema = new mongoose.Schema(
 
 projectFinanceSchema.index({ "milestones.status": 1, "milestones.dueDate": 1 });
 
+projectFinanceSchema.plugin(tenantPlugin); // one organisation per document (module-access-plan.md)
 module.exports = mongoose.model("ProjectFinance", projectFinanceSchema);

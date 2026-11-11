@@ -133,6 +133,22 @@ const liveCampaignsSchema = z.object({
   query: z.object({ city: plainText(50).optional() }).passthrough()
 });
 
+// ── Direct video uploads ──────────────────────────────────────────────────────
+
+const videoTicketSchema = z.object({
+  body: z.object({ bytes: z.number().int().positive() }).strict()
+});
+
+const videoFinishSchema = z.object({
+  body: z
+    .object({
+      publicId: z.string().max(300).regex(/^[A-Za-z0-9_\-/]+$/, "Invalid upload"),
+      // The file's size in the browser: a different stored size means a piece never arrived
+      bytes: z.number().int().positive()
+    })
+    .strict()
+});
+
 // ── Catalog ───────────────────────────────────────────────────────────────────
 
 const catalogImage = z
@@ -185,6 +201,8 @@ module.exports = {
   campaignEventSchema,
   leadSchema,
   liveCampaignsSchema,
+  videoTicketSchema,
+  videoFinishSchema,
   createCatalogSchema,
   updateCatalogSchema,
   catalogListSchema,

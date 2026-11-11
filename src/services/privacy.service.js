@@ -63,7 +63,7 @@ const exportMyData = async (userId) => {
   return {
     exportedAt: new Date(),
     format: "bonito-data-export-v1",
-    note: "Chat messages are end-to-end encrypted. The Bonito app adds your readable chat history to this file on your device; Bonito's servers cannot read it.",
+    note: "Chat messages are end-to-end encrypted. The app adds your readable chat history to this file on your device; the servers cannot read it.",
     account: {
       ...user,
       currentSessions: (user.currentSessions || []).map((s) => ({ deviceName: s.deviceName, createdAt: s.createdAt, lastActive: s.lastActive, ipAddress: s.ipAddress }))
@@ -99,7 +99,7 @@ const exportMyData = async (userId) => {
 // ── Deletion requests ────────────────────────────────────────────────────────
 
 const requestDeletion = async (user, reason = "") => {
-  if (user.role !== ROLES.CUSTOMER) throw new ApiError(403, "Staff accounts are closed through Bonito HR");
+  if (user.role !== ROLES.CUSTOMER) throw new ApiError(403, "Staff accounts are closed by your organisation's admins");
   try {
     return await DeletionRequest.create({ user: user._id, reason });
   } catch (err) {
@@ -174,7 +174,7 @@ const anonymiseCustomer = async (userId) => {
     if (conv.members.length < 2) conv.isArchived = true;
     await conv.save({ validateBeforeSave: false });
     try {
-      require("../sockets").getIO()?.in(`user:${userId}`).socketsLeave(`conv:${conv._id}`);
+      require("../sockets").getIO()?.in(`user:${userId}`).socketsLeave(require("./receipt.service").chatRooms(conv._id));
     } catch {
       /* socket layer optional */
     }

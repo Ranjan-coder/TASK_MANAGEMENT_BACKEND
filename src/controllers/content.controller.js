@@ -8,7 +8,7 @@ const ApiResponse = require("../utils/ApiResponse");
 const asyncHandler = require("../utils/asyncHandler");
 const logger = require("../utils/logger");
 const { recordAuditLog } = require("../services/audit.service");
-const { uploadMedia, destroyMedia } = require("../services/media.service");
+const { uploadMedia, destroyMedia, videoUploadTicket, finishVideoUpload } = require("../services/media.service");
 const { ROLES } = require("../config/roles");
 
 const CONTENT_MANAGERS = [ROLES.SUPERADMIN, ROLES.ADMIN, ROLES.MARKETING];
@@ -72,6 +72,25 @@ const uploadContentMedia = asyncHandler(async (req, res) => {
     action: "content_media_uploaded",
     targetType: "System",
     metadata: { purpose, publicId: media.publicId, resourceType: media.resourceType, bytes: media.bytes }
+  });
+
+  res.status(201).json(new ApiResponse(201, media, "Uploaded"));
+});
+
+/** POST /admin/media/video-ticket { bytes } — signed, chunked upload straight to Cloudinary */
+const createVideoTicket = asyncHandler(async (req, res) => {
+  res.status(201).json(new ApiResponse(201, videoUploadTicket(req.body.bytes)));
+});
+
+/** POST /admin/media/video-finish { publicId } — checks what arrived, returns the media object */
+const finishVideo = asyncHandler(async (req, res) => {
+  const media = await finishVideoUpload(req.body.publicId, req.body.bytes);
+
+  await recordAuditLog({
+    req,
+    action: "content_media_uploaded",
+    targetType: "System",
+    metadata: { purpose: "campaign", publicId: media.publicId, resourceType: "video", bytes: media.bytes, direct: true }
   });
 
   res.status(201).json(new ApiResponse(201, media, "Uploaded"));
@@ -158,15 +177,26 @@ const listCampaignLeads = asyncHandler(async (req, res) => {
 
 // ── Campaigns: customers ──────────────────────────────────────────────────────
 
-/** GET /campaigns/live[?city=] — what the customer Home page shows. */
-const getLiveCampaigns = asyncHandler(async (req, res) => {
-  const filter = liveFilter();
-  if (req.query.city) {
-    filter.$and = [{ $or: [{ targetCities: { $size: 0 } }, { targetCities: req.query.city }] }];
-  } else {
-    filter.targetCities = { $size: 0 };
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * GET /campaigns/live[?city=] — what the customer Home page shows.
+ * City targeting narrows the list only when the customer's city is known:
+ * customers have no city on file, so hiding targeted campaigns from them
+ * meant a campaign with any city set was shown to nobody.
+ */
+const liveCampaignFilter = (city, now = new Date()) => {
+  const filter = liveFilter(now);
+  if (city?.trim()) {
+    // "pune" matches a campaign targeted at "Pune"
+    const rx = new RegExp(`^${escapeRegex(city.trim())}$`, "i");
+    filter.$and = [{ $or: [{ targetCities: { $size: 0 } }, { targetCities: rx }] }];
   }
-  const campaigns = await Campaign.find(filter).sort({ priority: -1, startAt: -1 }).limit(20);
+  return filter;
+};
+
+const getLiveCampaigns = asyncHandler(async (req, res) => {
+  const campaigns = await Campaign.find(liveCampaignFilter(req.query.city)).sort({ priority: -1, startAt: -1 }).limit(20);
   res.status(200).json(new ApiResponse(200, campaigns.map(publicCampaign)));
 });
 
@@ -313,6 +343,8 @@ const deleteCatalogItem = asyncHandler(async (req, res) => {
 module.exports = {
   CONTENT_MANAGERS,
   uploadContentMedia,
+  createVideoTicket,
+  finishVideo,
   listCampaigns,
   getCampaign,
   createCampaign,
@@ -329,5 +361,5 @@ module.exports = {
   createCatalogItem,
   updateCatalogItem,
   deleteCatalogItem,
-  _internals: { slugify, publicCampaign, istDay }
+  _internals: { slugify, publicCampaign, istDay, liveCampaignFilter }
 };

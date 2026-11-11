@@ -82,6 +82,10 @@ const advance = async (alert, now) => {
   if (!conv?.project || !member) return finish(alert, "left");
   if (member.lastRead && member.lastRead >= alert.since) return finish(alert, "read");
   if (await isOnline(alert.user)) return finish(alert, "online");
+  // Muted, snoozed or "mentions only" for this chat: no "your designer replied" alert (CH-P)
+  const { isSilenced } = require("./mention.service");
+  const state = await require("../models/ChatMemberState").findOne({ conversation: conv._id, user: alert.user }).lean();
+  if (isSilenced(state, { mentioned: false }, +now)) return finish(alert, "muted");
 
   const [customer, sender] = await Promise.all([
     User.findById(alert.user).select("status phone phoneVerified notificationPrefs"),

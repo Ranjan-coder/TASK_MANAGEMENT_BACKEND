@@ -80,7 +80,8 @@ const getTeamPerformance = asyncHandler(async (req, res) => {
               {
                 $and: [
                   { $lt: ["$dueDate", new Date()] },
-                  { $nin: ["$status", ["completed", "cancelled"]] }
+                  // $nin is a query operator, not an expression (it made this route fail with a 500)
+                  { $not: [{ $in: ["$status", ["completed", "cancelled"]] }] }
                 ]
               },
               1,

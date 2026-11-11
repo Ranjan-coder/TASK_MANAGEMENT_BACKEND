@@ -84,7 +84,7 @@ const alertNewDevice = async (user, deviceName, ipAddress) => {
     const { addEmailJob } = require("../jobs/queue");
     await addEmailJob({
       to: user.email,
-      subject: "New sign-in to your Bonito account",
+      subject: `New sign-in to your ${user.orgId ? await require("./organisation.service").currentOrgName("") : "platform"} account`.replace("  ", " "),
       html: `<p>Hi ${String(user.name).replace(/[<>&"]/g, "")},</p>
 <p>Your account was just signed in from <strong>${deviceName}</strong> (IP ${ipAddress}) at ${new Date().toUTCString()}.</p>
 <p>If this was you, no action is needed. If not, sign out that device in <em>Settings → Devices</em> and change your password.</p>`
@@ -186,7 +186,25 @@ const verifyStepToken = (token, stage) => {
   }
 };
 
+/**
+ * Marks a step token as used; throws if it already was. The token must carry a
+ * jti (sign it with { jti }). Atomic: of two parallel uses, only one succeeds.
+ */
+const consumeStepToken = async (decoded) => {
+  const UsedStepToken = require("../models/UsedStepToken");
+  // Single use rests on the unique index: make sure it exists (built once, then cached)
+  await UsedStepToken.init();
+  if (!decoded?.jti) throw new ApiError(401, "Your verification session has expired. Please start again.", [{ code: "STEP_TOKEN_INVALID" }]);
+  try {
+    await UsedStepToken.create({ jti: decoded.jti, expiresAt: new Date(decoded.exp * 1000) });
+  } catch (err) {
+    if (err.code === 11000) throw new ApiError(401, "This link has already been used. Please start again.", [{ code: "STEP_TOKEN_USED" }]);
+    throw err;
+  }
+};
+
 module.exports = {
+  consumeStepToken,
   generateTokens,
   hashToken,
   setTokenCookies,
