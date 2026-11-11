@@ -125,11 +125,15 @@ const stageCounts = async ({ status } = {}) => {
 /** The customer's projects with their timelines (for Home). */
 const listMyProjects = async (customerId) => {
   const convs = await Conversation.find({ "project.customers": customerId, "members.user": customerId })
-    .select("name project lastActivityAt")
+    .select("name project lastActivityAt members.user")
     .populate("project.leadDesigner", "name avatarUrl")
     .sort({ lastActivityAt: -1 })
     .lean();
-  const views = await require("../modules/workflows/projectFlow.service").customerViews(convs);
+  const [views, contacts] = await Promise.all([
+    require("../modules/workflows/projectFlow.service").customerViews(convs),
+    // Who to contact about what (P4): every project at once — one settings read, one people query
+    require("./projectContacts.service").contactsForMany(convs)
+  ]);
   return convs.map((c) => {
     const t = timelineView(c.project);
     return {
@@ -143,7 +147,8 @@ const listMyProjects = async (customerId) => {
       // checklists (and their staff notes) stay with the team
       stageHistory: t.stageHistory.filter(customerFacing),
       // The company's own stages, as the customer should see them
-      flow: views.get(String(c._id))
+      flow: views.get(String(c._id)),
+      contacts: contacts.get(String(c._id)) || []
     };
   });
 };

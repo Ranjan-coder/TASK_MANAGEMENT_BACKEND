@@ -99,7 +99,61 @@ const testimonialBody = {
 const createTestimonialSchema = z.object({ body: z.object(testimonialBody).strict() });
 const updateTestimonialSchema = z.object({ params: z.object({ id }), body: z.object(testimonialBody).strict() });
 
+// ── Project contacts (project-contacts-plan.md) ──
+const { CONTACT_TOPICS, MAX_CONTACTS } = require("../models/subschemas/projectContact");
+const { normalizeIndianMobile } = require("../utils/phone");
+
+const contactItem = z
+  .object({
+    topic: z.enum(CONTACT_TOPICS),
+    label: text(0, 40).optional().default(""),
+    user: id,
+    phone: z.string().trim().max(20).optional().default(""),
+    whatsapp: z.boolean().optional().default(false),
+    email: z.string().trim().toLowerCase().max(120).optional().default(""),
+    hours: text(0, 60).optional().default("")
+  })
+  .strict()
+  .transform((c, ctx) => {
+    if (c.topic === "custom" && c.label.length < 2) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["label"], message: "Name the topic (e.g. Furniture delivery)" });
+    }
+    let phone = "";
+    if (c.phone) {
+      // Indian mobiles are stored as +91…; landlines / toll-free as digits
+      const digits = c.phone.replace(/[^\d+]/g, "");
+      phone = normalizeIndianMobile(c.phone) || (/^\+?\d{6,15}$/.test(digits) ? digits : "");
+      if (!phone) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["phone"], message: "Enter a valid phone number" });
+    }
+    if (c.whatsapp && !(phone && normalizeIndianMobile(phone))) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["whatsapp"], message: "WhatsApp needs a 10-digit mobile number" });
+    }
+    if (c.email && !z.string().email().safeParse(c.email).success) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["email"], message: "Enter a valid email" });
+    }
+    return { ...c, phone, whatsapp: Boolean(c.whatsapp && phone) };
+  });
+
+const contactsBody = z
+  .object({
+    contacts: z.array(contactItem).max(MAX_CONTACTS, `Up to ${MAX_CONTACTS} contacts`),
+    // The revision the editor started from (two editors can't overwrite each other)
+    rev: z.number().int().min(0)
+  })
+  .strict();
+
+const projectContactsSchema = z.object({ params: z.object({ id }), body: contactsBody });
+const companyContactsSchema = z.object({ body: contactsBody });
+const candidatesQuery = z.object({ search: text(0, 60).optional() }).strict();
+// One per route: the company list has no :id (Express passes params as {}, not undefined)
+const contactCandidatesSchema = z.object({ params: z.object({ id }), query: candidatesQuery });
+const companyCandidatesSchema = z.object({ query: candidatesQuery });
+
 module.exports = {
+  projectContactsSchema,
+  companyContactsSchema,
+  contactCandidatesSchema,
+  companyCandidatesSchema,
   stageSchema,
   stepMoveSchema,
   stepPathSchema,

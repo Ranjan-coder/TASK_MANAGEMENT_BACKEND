@@ -61,6 +61,40 @@ flowRoute("patch", "/:id/flow/extras/:extraId", v.extraUpdateSchema, "project_ex
 );
 flowRoute("post", "/:id/flow/checklist", v.checklistSchema, "project_checklist_ticked", (req) => flow().checklist({ conversationId: req.params.id, actor: req.user, ...req.body }));
 
+// ── /projects/:id/contacts — who the customer contacts about what (project-contacts-plan.md) ──
+const contacts = () => require("../services/projectContacts.service");
+const contactsLimiter = require("../middlewares/rateLimiter.middleware").createLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  message: "Too many changes. Please try again later."
+});
+// Read: the chat's members (customers included) and admins — checked in the service
+projectRoutes.get("/:id/contacts", rbacMiddleware("customer", ...STAFF), validate(v.idParams), asyncHandler(async (req, res) => ok(res, await contacts().getProjectContacts(req.params.id, req.user))));
+// Edit: admins and the project's manager (P1) — checked in the service
+projectRoutes.put(
+  "/:id/contacts",
+  rbacMiddleware(...STAFF),
+  contactsLimiter,
+  validate(v.projectContactsSchema),
+  asyncHandler(async (req, res) => {
+    const view = await contacts().setProjectContacts({ conversationId: req.params.id, actor: req.user, ...req.body });
+    await recordAuditLog({
+      req,
+      action: "project_contacts_updated",
+      targetType: "System",
+      targetId: req.params.id,
+      metadata: { contacts: req.body.contacts.map((c) => ({ topic: c.topic, label: c.label, user: c.user })) }
+    });
+    ok(res, view, "Contacts saved");
+  })
+);
+projectRoutes.get(
+  "/:id/contacts/candidates",
+  rbacMiddleware(...STAFF),
+  validate(v.contactCandidatesSchema),
+  asyncHandler(async (req, res) => ok(res, await contacts().projectCandidates(req.params.id, req.user, req.query.search)))
+);
+
 // ── /chat approvals (R4) — mounted on the chat router's paths ────────────────
 const approvalRoutes = express.Router();
 approvalRoutes.use(authMiddleware);

@@ -138,13 +138,15 @@ test("customers can fetch the word list and count a prevented message, but not m
   expect(paths).toEqual(["GET /api/v1/moderation/lexicon", "POST /api/v1/moderation/prevented"]);
 });
 
-test("customers reach only the approval answer, timeline and testimonials among Phase 8 routes", () => {
+test("customers reach only the approval answer, timeline, contacts (read) and testimonials among Phase 8 routes", () => {
   const phase8 = allowedForCustomer
-    .filter((r) => ["approvals", "/projects/", "testimonials", "quick-replies", "admin/leads"].some((k) => r.path.includes(k)))
+    .filter((r) => ["approvals", "/projects/", "testimonials", "quick-replies", "admin/leads", "settings"].some((k) => r.path.includes(k)))
     .map((r) => `${r.method} ${r.path}`)
     .sort();
   expect(phase8).toEqual([
     "GET /api/v1/chat/conversations/:id/approvals",
+    // Read only: editing contacts and the staff candidates list stay staff-only
+    "GET /api/v1/projects/:id/contacts",
     "GET /api/v1/projects/mine",
     "GET /api/v1/testimonials/",
     "POST /api/v1/chat/approvals/:id/decision"

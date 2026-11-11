@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const tenantPlugin = require("./plugins/tenant.plugin");
+const { projectContactSchema } = require("./subschemas/projectContact");
 
 const { STAGE_KEYS: PROJECT_STAGES } = require("../config/projectStages");
 
@@ -126,6 +127,10 @@ const conversationSchema = new mongoose.Schema(
           default: undefined,
           _id: false
         },
+        // Who the customer contacts about what (project-contacts-plan.md), over the
+        // company's defaults. contactsRev: two editors can't overwrite each other.
+        contacts: { type: [projectContactSchema], default: undefined },
+        contactsRev: { type: Number, default: 0 },
         stageHistory: {
           type: [
             {

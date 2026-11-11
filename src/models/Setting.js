@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const tenantPlugin = require("./plugins/tenant.plugin");
+const { projectContactSchema } = require("./subschemas/projectContact");
 
 /**
  * App-wide settings (one document, key "global"): business hours for the
@@ -60,6 +61,10 @@ const settingSchema = new mongoose.Schema(
       friendReward: { type: String, trim: true, maxlength: 120, default: "₹2,000 off their first project" },
       terms: { type: String, trim: true, maxlength: 600, default: "The reward is given once your friend's project starts and their first payment is received." }
     },
+    // Company-wide project contacts (P2), e.g. one payments contact for every
+    // project; a project's own contacts replace these topic by topic
+    projectContacts: { type: [projectContactSchema], default: [] },
+    projectContactsRev: { type: Number, default: 0 },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null }
   },
   { timestamps: true }

@@ -97,6 +97,8 @@ const CUSTOMER_PAYMENT_RULES = [
 // Customer extras: project timeline, answering design approvals, testimonials
 const CUSTOMER_PROJECT_RULES = [
   rule("GET", "/projects/mine"),
+  // Their project's contacts (membership is checked by projectContacts.service)
+  rule("GET", `/projects/${ID}/contacts`),
   rule("GET", `/chat/conversations/${ID}/approvals`),
   rule("POST", `/chat/approvals/${ID}/decision`),
   rule("GET", "/testimonials")
