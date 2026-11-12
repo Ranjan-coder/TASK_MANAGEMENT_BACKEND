@@ -34,14 +34,62 @@ const hashToken = (token) => {
   return crypto.createHash("sha256").update(token).digest("hex");
 };
 
-const cookieBase = () => {
-  const isProd = config.env === "production";
-  return {
-    secure: isProd,
-    sameSite: isProd ? "strict" : "lax",
-    domain: isProd ? config.cookieDomain : undefined
-  };
+/**
+ * Known multi-tenant cloud hosting domains listed on the Public Suffix List (PSL).
+ * Browsers strictly prohibit setting `Domain=<suffix>` on these platforms to prevent
+ * cross-tenant session hijacking. Stored in a Set for fast lookup.
+ */
+const PUBLIC_SUFFIX_PLATFORMS = new Set([
+  "onrender.com",
+  "vercel.app",
+  "railway.app",
+  "fly.dev",
+  "herokuapp.com",
+  "netlify.app",
+  "github.io"
+]);
+
+/**
+ * Validates whether the configured cookie domain is eligible for broad subdomain scope.
+ * If running on a public cloud suffix or localhost, falls back to host-only (undefined domain).
+ *
+ * @param {string} [rawDomain] - The raw configured COOKIE_DOMAIN string
+ * @returns {string | undefined} - Validated domain or undefined for host-only cookies
+ * @complexity Time: O(K) where K is number of platforms (effectively O(1)), Space: O(1)
+ */
+const resolveValidCookieDomain = (rawDomain) => {
+  if (!rawDomain || typeof rawDomain !== "string") return undefined;
+
+  const normalized = rawDomain.trim().toLowerCase().replace(/^\./, "");
+  if (!normalized || normalized === "localhost" || normalized.includes("127.0.0.1")) {
+    return undefined;
+  }
+
+  // Reject public suffix domains so browsers do not reject the Set-Cookie header
+  for (const suffix of PUBLIC_SUFFIX_PLATFORMS) {
+    if (normalized === suffix || normalized.endsWith(`.${suffix}`)) {
+      return undefined;
+    }
+  }
+
+  return normalized;
 };
+
+/**
+ * Pre-computed, immutable baseline cookie configuration.
+ * Memoized at startup: O(1) runtime access with zero repetitive heap allocation or regex overhead.
+ */
+const IS_PROD = config.env === "production";
+const RESOLVED_COOKIE_DOMAIN = IS_PROD ? resolveValidCookieDomain(config.cookieDomain) : undefined;
+
+const BASE_COOKIE_OPTIONS = Object.freeze({
+  secure: IS_PROD,
+  sameSite: IS_PROD ? "none" : "lax",
+  domain: RESOLVED_COOKIE_DOMAIN,
+  path: "/"
+});
+
+const cookieBase = () => BASE_COOKIE_OPTIONS;
 
 /**
  * Untrusted devices get browser-session cookies (gone when the browser closes)
